@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import re
 from collections import Counter
 from scipy.stats import entropy
 
@@ -16,17 +17,23 @@ def compute_entropy(text: str, by: str = 'word') -> float:
     Returns:
         Entropy value in bits, or 0.0 for empty or single-token text.
     """
-    text = str(text).strip()
+    text = str(text).strip().lower()
     if not text:
         return 0.0
 
-    tokens = text.split() if by == 'word' else list(text)
+    if by == 'word':
+        # [^\W_] matches Unicode letters/digits (word chars) excluding underscore.
+        tokens = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*'?", text, flags=re.UNICODE)
+    else:
+        tokens = list(text)
+
     if len(tokens) <= 1:
         return 0.0
 
     counter = Counter(tokens)
     probs = np.array([v / len(tokens) for v in counter.values()])
     return entropy(probs, base=2)
+
 
 def classify_transcriptions(df: pd.DataFrame, threshold: float = 1.5) -> pd.DataFrame:
     """
@@ -46,6 +53,7 @@ def classify_transcriptions(df: pd.DataFrame, threshold: float = 1.5) -> pd.Data
     df['entropy'] = df['transcription'].apply(lambda x: compute_entropy(x, 'word'))
     df['type'] = df['entropy'].apply(lambda x: 'backchannel' if x < threshold else 'turn')
     return df
+
 
 def merge_turns_with_context(
     df: pd.DataFrame,
@@ -94,12 +102,16 @@ def merge_turns_with_context(
         while j < len(df):
             next_segment = df.iloc[j]
 
-            # Only interested in turns from the same speaker
-            if next_segment['type'] != 'turn' or next_segment['speaker'] != speaker:
+            # Can't merge past turns from other speakers
+            if next_segment['type'] == 'turn' and next_segment['speaker'] != speaker:
+                break
+
+            # Skip backchannels (allow merging across them if short)
+            if next_segment['type'] != 'turn':
                 j += 1
                 continue
 
-            # Check gap
+            # Now it's a same-speaker turn - check if we can merge
             gap = next_segment['start_sec'] - current['end_sec']
             if gap > max_gap_sec:
                 break  # Gap too large, stop looking
