@@ -1,17 +1,24 @@
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+"""
+Based on Conversational_speech_labeling_pipeline by Hanlu He.
+
+https://github.com/hanlululu/Conversational_speech_labeling_pipeline
+"""
 
 import gc
 import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import soundfile as sf
 import torch
 from tqdm.auto import tqdm
-
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from transformers.pipelines.base import Pipeline
+
+# Set PyTorch CUDA memory configuration for better fragmentation handling
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 
 @dataclass
@@ -21,7 +28,7 @@ class TransformersASRModel:
 
 
 def load_whisper_model(
-    model_name: str = "large-v3",
+    transciption_model_name: str = "openai/whisper-large-v3",
     device: str = "cpu",
     language: Optional[str] = "da",
     cache_dir: Optional[str] = None,
@@ -31,8 +38,8 @@ def load_whisper_model(
 
     Parameters
     ----------
-    model_name
-        Model identifier (e.g., 'large-v3')
+    transciption_model_name
+        Model identifier (e.g., 'openai/whisper-large-v3')
     device
         'cpu' or 'cuda' for GPU inference
     language
@@ -50,26 +57,26 @@ def load_whisper_model(
 
     # Convert device string to torch.device
     if device == "auto":
-        torch_device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
+        torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    elif device == 'cuda':
+    elif device == "cuda":
         torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     else:
         torch_device = torch.device("cpu")
         torch_dtype = torch.float32
 
-    model_id = f"openai/whisper-{model_name}"
-
     # Load model and processor
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id,
+        transciption_model_name,
         dtype=torch_dtype,
         cache_dir=cache_dir,
     )
     model.to(torch_device)
 
-    processor = AutoProcessor.from_pretrained(model_id, cache_dir=cache_dir)
+    processor = AutoProcessor.from_pretrained(
+        transciption_model_name, cache_dir=cache_dir
+    )
 
     # Create pipeline
     pipe = pipeline(
@@ -80,6 +87,7 @@ def load_whisper_model(
         batch_size=transformers_batch_size,
         dtype=torch_dtype,
         device=torch_device,
+        chunk_length_s=30.0,
     )
 
     return TransformersASRModel(
@@ -88,7 +96,9 @@ def load_whisper_model(
     )
 
 
-def _save_segment_wav(out_path: str, audio_array: np.ndarray, sr: int = 16000, compress=True) -> None:
+def _save_segment_wav(
+    out_path: str, audio_array: np.ndarray, sr: int = 16000, compress: bool = True
+) -> None:
     """Persist a speech segment to disk as 16-bit PCM WAV."""
 
     if compress:
@@ -104,17 +114,17 @@ def _transcribe_batch(
     batch_files: List[str],
     batch_caches: List[str],
     model: TransformersASRModel,
-    cache: bool = False
+    cache: bool = False,
 ) -> List[str]:
     """Transcribe a batch of segment files using pipeline batching.
-    
+
     Returns list of transcribed texts (in same order as input).
     """
     # Check which files need transcription (not cached)
     files_to_transcribe = []
     file_indices = []
-    results = [''] * len(batch_files)
-    
+    results = [""] * len(batch_files)
+
     for i, (seg_file, txt_cache) in enumerate(zip(batch_files, batch_caches)):
         if cache and os.path.exists(txt_cache):
             # Load from cache
@@ -124,11 +134,11 @@ def _transcribe_batch(
             # Needs transcription
             files_to_transcribe.append(seg_file)
             file_indices.append(i)
-    
+
     # If no files need transcription, return cached results
     if not files_to_transcribe:
         return results
-    
+
     pipe = model.pipeline
     language = model.language
 
@@ -143,16 +153,20 @@ def _transcribe_batch(
 
     total_duration = sum(durations)
 
-    generate_kwargs: Dict[str, Any] = {"task": "transcribe", "return_timestamps": True}
+    generate_kwargs: Dict[str, Any] = {
+        "task": "transcribe"
+    }  # , "return_timestamps": True
     if language:
         generate_kwargs["language"] = language
 
     # Try to transcribe batch, if OOM or batching error then split and retry
     try:
-        batch_results = pipe(files_to_transcribe, 
-                             generate_kwargs=generate_kwargs,
-                             batch_size=len(files_to_transcribe))
-                             
+        batch_results = pipe(
+            files_to_transcribe,
+            return_timestamps=True,
+            generate_kwargs=generate_kwargs,
+            batch_size=len(files_to_transcribe),
+        )
 
         if isinstance(batch_results, dict):
             batch_results = [batch_results]
@@ -164,16 +178,21 @@ def _transcribe_batch(
             cache_path = batch_caches[batch_idx]
             with open(cache_path, "w", encoding="utf-8") as cache_file:
                 cache_file.write(text)
-        
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     except (RuntimeError, ValueError) as e:
         error_msg = str(e).lower()
-        if "out of memory" in error_msg or "cuda" in error_msg or "different keys" in error_msg:
-            # OOM or batching error - process individually with aggressive memory management
+        if (
+            "out of memory" in error_msg
+            or "cuda" in error_msg
+            or "different keys" in error_msg
+        ):
+            # OOM or batching error - process individually with memory management
             print(
-                f"\n⚠️  Error with batch ({len(files_to_transcribe)} files, {total_duration:.1f}s total): {e}"
+                f"\n⚠️  Error with batch ({len(files_to_transcribe)} files, \
+                {total_duration:.1f}s total): {e}"
             )
             print("    → Splitting into individual transcriptions...")
             if torch.cuda.is_available():
@@ -181,9 +200,9 @@ def _transcribe_batch(
             gc.collect()
 
             for batch_idx, seg_file in zip(file_indices, files_to_transcribe):
-                batch_result = pipe(seg_file,
-                                    generate_kwargs=generate_kwargs,
-                                    return_timestamps=True)
+                batch_result = pipe(
+                    seg_file, generate_kwargs=generate_kwargs, return_timestamps=True
+                )
                 text = batch_result.get("text", "").strip()
                 results[batch_idx] = text
 
@@ -196,9 +215,8 @@ def _transcribe_batch(
                 gc.collect()
         else:
             raise  # Re-raise non-OOM/batching errors
-    
-    return results
 
+    return results
 
 
 def transcribe_segments(
@@ -249,14 +267,17 @@ def transcribe_segments(
     os.makedirs(output_dir, exist_ok=True)
     audio, sr = sf.read(audio_path)
     prefix = file_prefix or speaker
-    
+
     # Step 1: Extract all segments to WAV files with progress bar
     segment_info = []  # List of segment metadata dicts
-    
-    for idx, seg in tqdm(segments.iterrows(), total=len(segments), desc="Extracting segments"):
+
+    for idx, seg in tqdm(
+        segments.iterrows(), total=len(segments), desc="Extracting segments"
+    ):
         start = float(seg["start_sec"])
         end = float(seg["end_sec"])
         row_speaker = seg.get("speaker", speaker)
+        turn_type = seg.get("Turn_Type", "T")  # Preserve Turn_Type if present
         seg_filename = os.path.join(
             output_dir,
             f"{prefix}_seg_{idx}_{start:.2f}_{end:.2f}.wav",
@@ -269,45 +290,53 @@ def transcribe_segments(
 
         # Skip segments that are too short
         if len(segment_audio) < min_duration_samples:
-            segment_info.append({
-                'idx': idx,
-                'speaker': row_speaker,
-                'start_sec': start,
-                'end_sec': end,
-                'transcription': '',
-                'skip': True
-            })
+            segment_info.append(
+                {
+                    "idx": idx,
+                    "speaker": row_speaker,
+                    "start_sec": start,
+                    "end_sec": end,
+                    "turn_type": turn_type,
+                    "transcription": "",
+                    "skip": True,
+                }
+            )
             continue
 
         # Save segment to WAV file (even if cached, for consistency)
         if not os.path.exists(seg_filename):
             _save_segment_wav(seg_filename, segment_audio, sr=sr, compress=compress)
 
-        segment_info.append({
-            'idx': idx,
-            'speaker': row_speaker,
-            'start_sec': start,
-            'end_sec': end,
-            'seg_filename': seg_filename,
-            'txt_cache': txt_cache,
-            'skip': False
-        })
-    
+        segment_info.append(
+            {
+                "idx": idx,
+                "speaker": row_speaker,
+                "start_sec": start,
+                "end_sec": end,
+                "turn_type": turn_type,
+                "seg_filename": seg_filename,
+                "txt_cache": txt_cache,
+                "skip": False,
+            }
+        )
+
     # Step 2: Transcribe segments in batches with progress bar
-    valid_segments = [s for s in segment_info if not s['skip']]
-    
+    valid_segments = [s for s in segment_info if not s["skip"]]
+
     # Create results list matching segment_info order
     transcriptions = {}  # Maps seg_filename -> transcription text
-    
+
     # Determine maximum batch duration
-    max_batch_duration = float(batch_size) if batch_size and batch_size > 0 else float('inf')
+    max_batch_duration = (
+        float(batch_size) if batch_size and batch_size > 0 else float("inf")
+    )
 
     batches: List[List[Dict[str, Any]]] = []
     current_batch: List[Dict[str, Any]] = []
     current_duration = 0.0
 
     for seg in valid_segments:
-        seg_duration = float(seg['end_sec'] - seg['start_sec'])
+        seg_duration = float(seg["end_sec"] - seg["start_sec"])
 
         # If this segment alone exceeds the cap, process it alone
         if seg_duration > max_batch_duration:
@@ -329,42 +358,47 @@ def transcribe_segments(
 
     if current_batch:
         batches.append(current_batch)
-    
+
     # Process batches
     for batch in tqdm(batches, desc=f"Transcribing {len(batches)} batches"):
         # Extract batch file paths and caches
-        batch_files = [s['seg_filename'] for s in batch]
-        batch_caches = [s['txt_cache'] for s in batch]
-        
+        batch_files = [s["seg_filename"] for s in batch]
+        batch_caches = [s["txt_cache"] for s in batch]
+
         # Transcribe batch
         batch_texts = _transcribe_batch(batch_files, batch_caches, model, cache)
-        
+
         # Store results
         for seg_info, text in zip(batch, batch_texts):
-            transcriptions[seg_info['seg_filename']] = text
-        
+            transcriptions[seg_info["seg_filename"]] = text
+
         # Clear GPU memory after each batch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
-    
+
     # Assemble final results in original order
     results = []
     for seg_info in segment_info:
-        if seg_info['skip']:
-            results.append({
-                'speaker': seg_info['speaker'],
-                'start_sec': seg_info['start_sec'],
-                'end_sec': seg_info['end_sec'],
-                'transcription': ''
-            })
+        if seg_info["skip"]:
+            results.append(
+                {
+                    "speaker": seg_info["speaker"],
+                    "start_sec": seg_info["start_sec"],
+                    "end_sec": seg_info["end_sec"],
+                    "turn_type": seg_info.get("turn_type", "T"),
+                    "transcription": "",
+                }
+            )
         else:
-            results.append({
-                'speaker': seg_info['speaker'],
-                'start_sec': seg_info['start_sec'],
-                'end_sec': seg_info['end_sec'],
-                'transcription': transcriptions[seg_info['seg_filename']]
-            })
-    
-    return results
+            results.append(
+                {
+                    "speaker": seg_info["speaker"],
+                    "start_sec": seg_info["start_sec"],
+                    "end_sec": seg_info["end_sec"],
+                    "turn_type": seg_info.get("turn_type", "T"),
+                    "transcription": transcriptions[seg_info["seg_filename"]],
+                }
+            )
 
+    return results

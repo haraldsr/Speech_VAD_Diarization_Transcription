@@ -1,11 +1,54 @@
-numpy==1.25.0
-pandas==2.2.0
-scipy==1.11.0
-soundfile==0.12.1
-torchaudio==2.2.0
-rVADfast==0.1.7
-whisperx==2.0.0
-torch==2.2.0
-tqdm==4.65.0
-click==8.1.7
-pyyaml==6.0
+# Core Audio & Speech Processing
+pyannote.audio>=4.0.0
+speechbrain>=1.0.0
+transformers>=4.48.0
+tokenizers>=0.21.0
+
+# Audio I/O and Processing
+soundfile>=0.12.0
+torchaudio==2.8.0  # Must match torch version for pyannote.audio 4.0.1
+
+# Speech-specific utilities
+rvadfast>=0.0.5
+asteroid-filterbanks>=0.4.0
+torch-audiomentations>=0.12.0
+
+# Deep Learning Framework
+# Note: pyannote.audio 4.0.1 requires torch==2.8.0
+torch==2.8.0
+torchaudio==2.8.0
+torchcodec==0.7.0
+torchvision==0.23.0  # Compatible with torch 2.8
+torchmetrics>=1.8.0
+
+# Scientific Computing
+numpy>=1.25.0
+scipy>=1.11.0
+pandas>=2.2.0
+
+# Machine Learning Utilities
+scikit-learn>=1.0.0
+pytorch-metric-learning>=2.9.0
+lightning>=2.5.0
+
+# Data Processing & Configuration
+datasets>=4.0.0
+huggingface-hub>=0.36.0
+pyyaml>=6.0
+hyperpyyaml>=1.2.0
+ruamel.yaml>=0.18.0
+
+# Progress & Utilities
+tqdm>=4.65.0
+rich>=14.0.0
+
+# Jupyter & Development (optional)
+jupyter>=1.0.0
+jupyterlab>=4.0.0
+ipywidgets>=8.0.0
+
+# Code Quality (optional, for development)
+black>=23.0.0
+flake8>=6.0.0
+isort>=5.12.0
+mypy>=1.7.0

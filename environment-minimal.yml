@@ -1,0 +1,7 @@
+# Use: mamba env create -f environment-minimal.yml -n <name>
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - ffmpeg=7.*  # torchcodec 0.7.0 (required by pyannote) supports FFmpeg 4-7
+  - pip
