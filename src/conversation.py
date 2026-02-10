@@ -99,7 +99,7 @@ def process_conversation(
     interactive_energy_filter: bool = False,
     skip_vad_if_exists: bool = True,
     skip_transcription_if_exists: bool = True,
-    min_duration_samples: float = float('inf'), # float('inf'): skips transcription, default: 1600
+    min_duration_samples: float = 1600, # float('inf'): skips transcription, default: 1600
     export_elan: bool = True,
 ) -> Dict[str, object]:
     """
