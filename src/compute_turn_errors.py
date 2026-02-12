@@ -261,11 +261,11 @@ def tabulate_floor_transfers(
         speaker_next = turns.iloc[i_turn + 1]["speaker"]
 
         # Floor transfers only occur between different speakers
-        if speaker_current == speaker_next:
-            raise ValueError(
-                f"Consecutive turns by the same speaker found at index {i_turn}. "
-                "Expected alternating speakers for floor transfers."
-            )
+        # if speaker_current == speaker_next:
+        #     raise ValueError(
+        #         f"Consecutive turns by the same speaker found at index {i_turn}. "
+        #         "Expected alternating speakers for floor transfers."
+        #     )
 
         # Create floor transfer entry
         speakers = f"{speaker_current}-{speaker_next}"
@@ -299,7 +299,7 @@ def compute_all_errors(
     df_ref: pd.DataFrame,
     df_est: pd.DataFrame,
     min_overlap_ratio: float,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[dict,pd.DataFrame]:
     """
     Compute turn errors for both turns and floor transfers.
 
@@ -321,15 +321,85 @@ def compute_all_errors(
 
     err_df = pd.concat([turn_errors_df, fto_errors_df], ignore_index=True)
 
-    return err_df
+    # Backchannel error metrics
+    BC_FP = err_df[(err_df["turn_type"] == "B") & (err_df["detected"].isna())]
+    BC_TP = err_df[(err_df["turn_type"] == "B") & (err_df["detected"] == True)]
+    BC_FN = err_df[(err_df["turn_type"] == "B") & (err_df["detected"] == False)]
+    
+    BC_metrics = {
+      "precision": len(BC_TP) / (len(BC_TP) + len(BC_FP)) if (len(BC_TP) + len(BC_FP)) > 0 else 0.0,
+      "recall": len(BC_TP) / (len(BC_TP) + len(BC_FN)) if (len(BC_TP) + len(BC_FN)) > 0 else 0.0,
+      "mean_duration_delta": BC_TP["duration_delta"].dropna().abs().mean() if not BC_TP.empty else np.nan,
+      "mean_start_delta": BC_TP["start_delta"].dropna().abs().mean() if not BC_TP.empty else np.nan,
+      "mean_end_delta": BC_TP["end_delta"].dropna().abs().mean() if not BC_TP.empty else np.nan,
+    }
+
+    # Turn error metrics
+    T_FP = err_df[(err_df["turn_type"] == "T") & (err_df["detected"].isna())]
+    T_TP = err_df[(err_df["turn_type"] == "T") & (err_df["detected"] == True)]
+    T_FN = err_df[(err_df["turn_type"] == "T") & (err_df["detected"] == False)]
+
+    T_metrics = {
+        "precision": len(T_TP) / (len(T_TP) + len(T_FP)) if (len(T_TP) + len(T_FP)) > 0 else 0.0,
+        "recall": len(T_TP) / (len(T_TP) + len(T_FN)) if (len(T_TP) + len(T_FN)) > 0 else 0.0,
+        "mean_duration_delta": T_TP["duration_delta"].dropna().abs().mean() if not T_TP.empty else np.nan,
+        "mean_start_delta": T_TP["start_delta"].dropna().abs().mean() if not T_TP.empty else np.nan,
+        "mean_end_delta": T_TP["end_delta"].dropna().abs().mean() if not T_TP.empty else np.nan,
+    }
+
+    # Floor transfer error metrics
+    FTO_FP = err_df[(err_df["turn_type"] == "FTO") & (err_df["detected"].isna())]
+    FTO_TP = err_df[(err_df["turn_type"] == "FTO") & (err_df["detected"] == True)]
+    FTO_FN = err_df[(err_df["turn_type"] == "FTO") & (err_df["detected"] == False)]
+
+    FTO_metrics = {
+        "precision": len(FTO_TP) / (len(FTO_TP) + len(FTO_FP)) if (len(FTO_TP) + len(FTO_FP)) > 0 else 0.0,
+        "recall": len(FTO_TP) / (len(FTO_TP) + len(FTO_FN)) if (len(FTO_TP) + len(FTO_FN)) > 0 else 0.0,
+        "mean_duration_delta": FTO_TP["duration_delta"].dropna().abs().mean() if not FTO_TP.empty else np.nan,
+        "mean_start_delta": FTO_TP["start_delta"].dropna().abs().mean() if not FTO_TP.empty else np.nan,
+        "mean_end_delta": FTO_TP["end_delta"].dropna().abs().mean() if not FTO_TP.empty else np.nan,
+    }
+
+    err = {
+        "BC": BC_metrics,
+        "T": T_metrics,
+        "FTO": FTO_metrics,
+    }
+
+    return err, err_df
 
 
 
 if __name__ == "__main__":
     # Example usage
-    df_ref = pd.read_csv("demo\\annotations\\F1F2_quiet_food_1m_01_labels_manual_rinor.txt", sep="\t",header=None, names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "turn_type"])
+    df_ref = pd.read_csv("path\\to\\manual_labels.txt", sep="\t",header=None, names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "turn_type"])
+    df_ref = df_ref.replace({"speaker": {"Talker1": "P1", "Talker2": "P2"},"turn_type": {"t": "T", "b": "B"}})
+    df_ref = df_ref.drop(columns=["foo"])
 
     df_est = pd.read_csv("outputs\\dyad\\merged_turns.txt", sep="\t")
     
-    err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio=0.5)
-    print(err_df)
+    err,err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio=0.5)
+
+    print("-"*60)    
+
+    print(f"Backchannel Precision: {err['BC']['precision']:.2f}")
+    print(f"Backchannel Recall: {err['BC']['recall']:.2f}")
+    print(f"Backchannel Mean Duration Delta (abs): {err['BC']['mean_duration_delta']:.2f} seconds")
+    print(f"Backchannel Mean Start Delta (abs): {err['BC']['mean_start_delta']:.2f} seconds")
+    print(f"Backchannel Mean End Delta (abs): {err['BC']['mean_end_delta']:.2f} seconds")
+
+    print("-"*60)
+
+    print(f"Turn Precision: {err['T']['precision']:.2f}")
+    print(f"Turn Recall: {err['T']['recall']:.2f}")
+    print(f"Turn Mean Duration Delta (abs): {err['T']['mean_duration_delta']:.2f} seconds")
+    print(f"Turn Mean Start Delta (abs): {err['T']['mean_start_delta']:.2f} seconds")
+    print(f"Turn Mean End Delta (abs): {err['T']['mean_end_delta']:.2f} seconds")
+
+    print("-"*60)
+
+    print(f"FTO Precision: {err['FTO']['precision']:.2f}")
+    print(f"FTO Recall: {err['FTO']['recall']:.2f}")
+    print(f"FTO Mean Duration Delta (abs): {err['FTO']['mean_duration_delta']:.2f} seconds")
+    print(f"FTO Mean Start Delta (abs): {err['FTO']['mean_start_delta']:.2f} seconds")
+    print(f"FTO Mean End Delta (abs): {err['FTO']['mean_end_delta']:.2f} seconds")  

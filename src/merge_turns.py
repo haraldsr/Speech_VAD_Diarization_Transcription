@@ -177,17 +177,17 @@ def create_turns_df_windowed(
             j = target.name + 1
 
             # Add bridged opponent segments as separate entries if requested
-            # for bridged_idx in bridged_opponent_indices:
-            #     bridged_seg = segments.loc[bridged_idx]
-            #     turns.append(
-            #         {
-            #             "Speaker": bridged_seg["speaker"],
-            #             "Start_Sec": bridged_seg["start"],
-            #             "End_Sec": bridged_seg["end"],
-            #             "Duration_Sec": bridged_seg["duration"],
-            #             "Turn_Type": "BC",  # Mark as bridged/backchannel
-            #         }
-            #     )
+            for bridged_idx in bridged_opponent_indices:
+                bridged_seg = segments.loc[bridged_idx]
+                turns.append(
+                    {
+                        "speaker": bridged_seg["speaker"],
+                        "start_sec": bridged_seg["start"],
+                        "end_sec": bridged_seg["end"],
+                        "duration_sec": bridged_seg["duration"],
+                        "turn_type": "B",  # Mark as bridged/backchannel
+                    }
+                )
 
             continue  # Continue looking for more merges after bridging
 

@@ -109,7 +109,7 @@ def example_custom_whisper() -> dict:
         "output_dir": "outputs/custom",
         "vad_type": "silero",
         # Custom transcription settings
-        "transciption_model_name": "openai/whisper-large-v3",  # or a fine-tuned model
+        "transrciption_model_name": "openai/whisper-large-v3",  # or a fine-tuned model
         "whisper_language": "da",  # Danish
         "whisper_device": "cuda",  # Force GPU
     }
