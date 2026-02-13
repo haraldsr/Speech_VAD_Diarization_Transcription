@@ -14,36 +14,30 @@ import pandas as pd
 
 
 def compute_overlap_ratio(
-    s1: Tuple[float, float],
-    s2: Tuple[float, float],
+    s_ref: Tuple[float, float],
+    s_est: Tuple[float, float],
 ) -> float:
     """
     Compute the overlap ratio between two time segments.
 
     Args:
-        s1: (start_time, end_time) for first segment (ground truth, used as
-            reference for ratio).
-        s2: (start_time, end_time) for second segment (estimated).
+        s_ref: (start_time, end_time) for reference signal
+        s_est: (start_time, end_time) for estimated signal
 
     Returns:
-        Overlap ratio as overlapping duration / ground truth duration.
+        Overlap ratio as intersection / union signal duration.
     """
-    # Ensure segments are sorted [start, end]
-    s1 = cast(Tuple[float, float], tuple(sorted(s1)))
-    s2 = cast(Tuple[float, float], tuple(sorted(s2)))
+    # Sort segments to ensure compatibility with negative FTOs
+    s_ref = tuple(sorted(s_ref))
+    s_est = tuple(sorted(s_est))
 
-    # Compute overlap ratio as overlapping duration / true duration
-    overlapping_duration = min(s1[1], s2[1]) - max(s1[0], s2[0])
-    true_duration = s1[1] - s1[0]
+    # Compute overlap ratio as intersection / union 
+    intersection_duration = max(0.0, min(s_ref[1], s_est[1]) - max(s_ref[0], s_est[0]))
+    union_duration = max(s_ref[1], s_est[1]) - min(s_ref[0], s_est[0])
 
-    if true_duration <= 0:
-        warnings.warn(
-            f"Invalid reference segment duration: {true_duration}. "
-            "Overlap ratio set to 0.0."
-        )
-        return 0.0
+    overlap_ratio = intersection_duration / union_duration
 
-    return max(0.0, overlapping_duration) / true_duration
+    return overlap_ratio
 
 
 def compute_turn_errors(
@@ -265,37 +259,56 @@ def tabulate_floor_transfers(
         speaker_next = turns.iloc[i_turn + 1]["speaker"]
 
         # Floor transfers only occur between different speakers
-        # if speaker_current == speaker_next:
-        #     raise ValueError(
-        #         f"Consecutive turns by the same speaker found at index {i_turn}. "
-        #         "Expected alternating speakers for floor transfers."
-        #     )
+        if speaker_current == speaker_next:
+            warnings.warn(
+              f"Consecutive turns by the same speaker found at index {i_turn}. "
+              "Expected alternating speakers for floor transfers."
+            )
+        else:
+            # Create floor transfer entry
+            speakers = f"{speaker_current}-{speaker_next}"
+            t_start = turns.iloc[i_turn]["end_sec"]
+            t_end = turns.iloc[i_turn + 1]["start_sec"]
+            duration = t_end - t_start
 
-        # Create floor transfer entry
-        speakers = f"{speaker_current}-{speaker_next}"
-        t_start = turns.iloc[i_turn]["end_sec"]
-        t_end = turns.iloc[i_turn + 1]["start_sec"]
-        duration = t_end - t_start
-
-        floor_transfers.append(
-            {
-                "speaker": speakers,
-                "start_sec": t_start,
-                "end_sec": t_end,
-                "duration_sec": duration,
-                "turn_type": "FTO",
-            }
-        )
+            floor_transfers.append(
+                {
+                    "speaker": speakers,
+                    "start_sec": t_start,
+                    "end_sec": t_end,
+                    "duration_sec": duration,
+                    "turn_type": "FTO",
+                }
+            )
 
     df_fto = pd.DataFrame(floor_transfers)
 
-    # Verify floor transfer count
-    n_fto = len(df_fto)
-    expected_fto = n_turns - 1
-    if n_fto != expected_fto:
-        raise ValueError(f"Expected {expected_fto} floor transfers, but got {n_fto}.")
 
     return df_fto
+
+def print_error_summary(err: dict) -> None:
+    """
+    Print a summary of turn error metrics.
+
+    Args:
+        err: Dictionary containing error metrics for each turn type.
+    """
+    for turn_type, metrics in err.items():
+        print("-" * 60)
+        print(f"{turn_type} Precision: {metrics['precision']:.2f}")
+        print(f"{turn_type} Recall: {metrics['recall']:.2f}")
+        print(
+            f"{turn_type} Mean Duration Delta (abs): "
+            f"{metrics['mean_duration_delta']:.2f} seconds"
+        )
+        print(
+            f"{turn_type} Mean Start Delta (abs): "
+            f"{metrics['mean_start_delta']:.2f} seconds"
+        )
+        print(
+            f"{turn_type} Mean End Delta (abs): "
+            f"{metrics['mean_end_delta']:.2f} seconds"
+        )
 
 
 def compute_all_errors(
@@ -329,9 +342,9 @@ def compute_all_errors(
         type_df = err_df[err_df["turn_type"] == turn_type]
 
         # True positives: detected=True
-        tp = type_df["detected"].sum()
+        tp = (type_df["detected"] == 1).sum()
         # False negatives: detected=False
-        fn = (~type_df["detected"]).sum()
+        fn = (type_df["detected"] == 0).sum()
         # False positives: detected=NaN
         fp = type_df["detected"].isna().sum()
 
@@ -359,60 +372,71 @@ def compute_all_errors(
 
     return err, err_df
 
+def compute_and_print_errors(
+  label_dir: str,
+  conv_id: str,
+  annotator_id: str = "",
+  min_overlap_ratio: float = 0.1,
+  print_summary: bool = True,
+) -> dict:
+    """
+    Compute turn errors and optionally print a summary.
+
+    Args:
+        label_dir: Directory containing ground truth label files.
+        conv_id: Conversation identifier to select the appropriate label file.
+        annotator_id: Identifier for the annotator of the labels.
+        min_overlap_ratio: Minimum overlap ratio for matching turns.
+        print_summary: Whether to print the error summary.
+    Returns:
+        Dictionary of error metrics for each turn type.
+    """
+
+    # Load manual labels
+    df_ref = pd.read_csv(
+        f"{label_dir}/{conv_id}{annotator_id}.txt",
+        sep="\t",
+        header=None,
+        names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "turn_type"],
+    )
+    # Replace common label variations and drop unused columns
+    df_ref = df_ref.replace(
+        {
+            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
+            "turn_type": {"t": "T", "b": "B"},
+        }
+    )
+    df_ref = df_ref.drop(columns=["foo"])
+
+    df_est = pd.read_csv("outputs/dyad/merged_turns.txt", sep="\t")
+
+    err, err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio)
+
+    if print_summary:
+        print_error_summary(err)
+
+    return err
+
+
 
 if __name__ == "__main__":
     # Example usage
     df_ref = pd.read_csv(
-        "path\\to\\manual_labels.txt",
+        "demo/annotations/EXP29_T2_labels_rinor.txt",
         sep="\t",
         header=None,
         names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "turn_type"],
     )
     df_ref = df_ref.replace(
         {
-            "speaker": {"Talker1": "P1", "Talker2": "P2"},
+            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
             "turn_type": {"t": "T", "b": "B"},
         }
     )
     df_ref = df_ref.drop(columns=["foo"])
 
-    df_est = pd.read_csv("outputs\\dyad\\merged_turns.txt", sep="\t")
+    df_est = pd.read_csv("outputs/dyad/merged_turns.txt", sep="\t")
 
-    err, err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio=0.5)
+    err, err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio=0.1)
 
-    print("-" * 60)
-
-    print(f"Backchannel Precision: {err['BC']['precision']:.2f}")
-    print(f"Backchannel Recall: {err['BC']['recall']:.2f}")
-    print(
-        f"Backchannel Mean Duration Delta (abs): "
-        f"{err['BC']['mean_duration_delta']:.2f} seconds"
-    )
-    print(
-        f"Backchannel Mean Start Delta (abs): "
-        f"{err['BC']['mean_start_delta']:.2f} seconds"
-    )
-    print(
-        f"Backchannel Mean End Delta (abs): {err['BC']['mean_end_delta']:.2f} seconds"
-    )
-
-    print("-" * 60)
-
-    print(f"Turn Precision: {err['T']['precision']:.2f}")
-    print(f"Turn Recall: {err['T']['recall']:.2f}")
-    print(
-        f"Turn Mean Duration Delta (abs): {err['T']['mean_duration_delta']:.2f} seconds"
-    )
-    print(f"Turn Mean Start Delta (abs): {err['T']['mean_start_delta']:.2f} seconds")
-    print(f"Turn Mean End Delta (abs): {err['T']['mean_end_delta']:.2f} seconds")
-
-    print("-" * 60)
-
-    print(f"FTO Precision: {err['FTO']['precision']:.2f}")
-    print(f"FTO Recall: {err['FTO']['recall']:.2f}")
-    print(
-        f"FTO Mean Duration Delta (abs): "
-        f"{err['FTO']['mean_duration_delta']:.2f} seconds"
-    )
-    print(f"FTO Mean Start Delta (abs): {err['FTO']['mean_start_delta']:.2f} seconds")
-    print(f"FTO Mean End Delta (abs): {err['FTO']['mean_end_delta']:.2f} seconds")
+    print_error_summary(err)
