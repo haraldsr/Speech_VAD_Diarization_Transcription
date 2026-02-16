@@ -62,6 +62,18 @@ def classify_transcriptions(df: pd.DataFrame, threshold: float = 1.5) -> pd.Data
     df["type"] = df["entropy"].apply(
         lambda x: "backchannel" if x < threshold else "turn"
     )
+
+    overlaps = (
+        (df["type"] == "turn")
+        & (df["type"].shift(-1) == "turn")
+        & (df["speaker"] != df["speaker"].shift(-1))
+        & (df["end_sec"] >= df["end_sec"].shift(-1))
+        & (df["start_sec"] <= df["start_sec"].shift(-1))
+    )
+
+    # Mark the overlapped turn (next row) as "OT"
+    df.loc[overlaps.shift(1, fill_value=False), "type"] = "overlapped_turn"
+
     return df
 
 
@@ -103,7 +115,7 @@ def merge_turns_with_context(
 
         current = df.iloc[i].copy()
 
-        if current["type"] == "backchannel":
+        if current["type"] == "backchannel" or current["type"] == "overlapped_turn":
             merged.append(current)
             processed.add(i)
             continue
@@ -153,7 +165,10 @@ def merge_turns_with_context(
                     continue
                 else:
                     break
-            elif next_segment["type"] == "backchannel":
+            elif (
+                next_segment["type"] == "backchannel"
+                or next_segment["type"] == "overlapped_turn"
+            ):
                 # Skip short backchannels
                 if (
                     next_segment["end_sec"] - next_segment["start_sec"]

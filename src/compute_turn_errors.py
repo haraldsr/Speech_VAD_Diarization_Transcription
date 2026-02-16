@@ -28,10 +28,10 @@ def compute_overlap_ratio(
         Overlap ratio as intersection / union signal duration.
     """
     # Sort segments to ensure compatibility with negative FTOs
-    s_ref = tuple(sorted(s_ref))
-    s_est = tuple(sorted(s_est))
+    s_ref = cast(Tuple[float, float], tuple(sorted(s_ref)))
+    s_est = cast(Tuple[float, float], tuple(sorted(s_est)))
 
-    # Compute overlap ratio as intersection / union 
+    # Compute overlap ratio as intersection / union
     intersection_duration = max(0.0, min(s_ref[1], s_est[1]) - max(s_ref[0], s_est[0]))
     union_duration = max(s_ref[1], s_est[1]) - min(s_ref[0], s_est[0])
 
@@ -261,8 +261,8 @@ def tabulate_floor_transfers(
         # Floor transfers only occur between different speakers
         if speaker_current == speaker_next:
             warnings.warn(
-              f"Consecutive turns by the same speaker found at index {i_turn}. "
-              "Expected alternating speakers for floor transfers."
+                f"Consecutive turns by the same speaker found at index {i_turn}. "
+                "Expected alternating speakers for floor transfers."
             )
         else:
             # Create floor transfer entry
@@ -283,8 +283,8 @@ def tabulate_floor_transfers(
 
     df_fto = pd.DataFrame(floor_transfers)
 
-
     return df_fto
+
 
 def print_error_summary(err: dict) -> None:
     """
@@ -372,12 +372,13 @@ def compute_all_errors(
 
     return err, err_df
 
+
 def compute_and_print_errors(
-  label_dir: str,
-  conv_id: str,
-  annotator_id: str = "",
-  min_overlap_ratio: float = 0.1,
-  print_summary: bool = True,
+    label_dir: str,
+    conv_id: str,
+    annotator_id: str = "",
+    min_overlap_ratio: float = 0.1,
+    print_summary: bool = True,
 ) -> dict:
     """
     Compute turn errors and optionally print a summary.
@@ -402,7 +403,7 @@ def compute_and_print_errors(
     # Replace common label variations and drop unused columns
     df_ref = df_ref.replace(
         {
-            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
+            "speaker": {"Talker1": "P1", "p1": "P1", "Talker2": "P2", "p2": "P2"},
             "turn_type": {"t": "T", "b": "B"},
         }
     )
@@ -418,7 +419,6 @@ def compute_and_print_errors(
     return err
 
 
-
 if __name__ == "__main__":
     # Example usage
     df_ref = pd.read_csv(
@@ -429,7 +429,7 @@ if __name__ == "__main__":
     )
     df_ref = df_ref.replace(
         {
-            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
+            "speaker": {"Talker1": "P1", "p1": "P1", "Talker2": "P2", "p2": "P2"},
             "turn_type": {"t": "T", "b": "B"},
         }
     )

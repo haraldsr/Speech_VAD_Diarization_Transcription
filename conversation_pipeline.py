@@ -22,7 +22,9 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, rely on system environment variables
 
-from speech_vad_diarization_transcription import process_conversation, compute_and_print_errors
+from speech_vad_diarization_transcription import (
+    process_conversation,
+)
 
 # Optional: CarbonTracker for energy monitoring
 try:
@@ -132,6 +134,7 @@ def example_cpu_only() -> dict:
         "batch_size": 15.0,  # Smaller batches for CPU
         "whisper_transformers_batch_size": 16,
     }
+
 
 def example_full_options() -> dict:
     """
