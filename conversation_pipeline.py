@@ -130,7 +130,7 @@ def example_cpu_only() -> dict:
         "vad_type": "rvad",  # rvad is fastest on CPU
         "whisper_device": "cpu",
         "batch_size": 15.0,  # Smaller batches for CPU
-        "whisper_transformers_batch_size": 16,
+        "whisper_model_batch_size": 16,
     }
 
 def example_full_options() -> dict:
@@ -166,7 +166,7 @@ def example_full_options() -> dict:
         "transcription_model_name": "openai/whisper-large-v3",
         "whisper_device": "auto",  # 'auto', 'cuda', or 'cpu'
         "whisper_language": "da",
-        "whisper_transformers_batch_size": 100,
+        "whisper_model_batch_size": 100,
         "batch_size": 30.0,  # Seconds per batch
         # Classification
         "entropy_threshold": 1.5,  # Threshold for backchannel vs turn
