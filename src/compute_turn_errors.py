@@ -28,10 +28,10 @@ def compute_overlap_ratio(
         Overlap ratio as intersection / union signal duration.
     """
     # Sort segments to ensure compatibility with negative FTOs
-    s_ref = tuple(sorted(s_ref))
-    s_est = tuple(sorted(s_est))
+    s_ref = cast(Tuple[float, float], tuple(sorted(s_ref)))
+    s_est = cast(Tuple[float, float], tuple(sorted(s_est)))
 
-    # Compute overlap ratio as intersection / union 
+    # Compute overlap ratio as intersection / union
     intersection_duration = max(0.0, min(s_ref[1], s_est[1]) - max(s_ref[0], s_est[0]))
     union_duration = max(s_ref[1], s_est[1]) - min(s_ref[0], s_est[0])
 
@@ -261,8 +261,8 @@ def tabulate_floor_transfers(
         # Floor transfers only occur between different speakers
         if speaker_current == speaker_next:
             warnings.warn(
-              f"Consecutive turns by the same speaker found at index {i_turn}. "
-              "Expected alternating speakers for floor transfers."
+                f"Consecutive turns by the same speaker found at index {i_turn}. "
+                "Expected alternating speakers for floor transfers."
             )
         else:
             # Create floor transfer entry
@@ -284,8 +284,8 @@ def tabulate_floor_transfers(
 
     df_fto = pd.DataFrame(floor_transfers)
 
-
     return df_fto
+
 
 def print_error_summary(err: dict) -> None:
     """
@@ -429,7 +429,6 @@ def compute_all_errors(
 #         print_error_summary(err)
 
 #     return err
-
 
 
 if __name__ == "__main__":

@@ -45,23 +45,41 @@ def compute_entropy(text: str, by: str = "word") -> float:
 
 def classify_transcriptions(df: pd.DataFrame, threshold: float = 1.5) -> pd.DataFrame:
     """
-    Classify transcriptions as 'backchannel' or 'turn' based on entropy.
+    Classify transcriptions as 'backchannel', 'turn', or 'overlapped_turn'
+        based on entropy.
 
     Low entropy indicates repetitive/short responses (backchannels),
     high entropy indicates more diverse content (turns).
 
+    Additionally detects overlapped turns: when one speaker's turn is completely
+    enveloped (temporally contained) within another speaker's turn, the contained
+    turn is classified as 'overlapped_turn'.
+
     Args:
-        df: DataFrame with 'transcription' column.
-        threshold: Entropy threshold for classification.
+        df: DataFrame with 'transcription', 'speaker', 'start_sec', 'end_sec' columns.
+        threshold: Entropy threshold for classification (default: 1.5).
 
     Returns:
         DataFrame with added 'entropy' and 'type' columns.
+        'type' will be one of: 'backchannel', 'turn', or 'overlapped_turn'.
     """
     df = df.copy()
     df["entropy"] = df["transcription"].apply(lambda x: compute_entropy(x, "word"))
     df["type"] = df["entropy"].apply(
         lambda x: "backchannel" if x < threshold else "turn"
     )
+
+    overlaps = (
+        (df["type"] == "turn")
+        & (df["type"].shift(-1) == "turn")
+        & (df["speaker"] != df["speaker"].shift(-1))
+        & (df["end_sec"] >= df["end_sec"].shift(-1))
+        & (df["start_sec"] <= df["start_sec"].shift(-1))
+    )
+
+    # Mark the overlapped turn (next row) as "OT"
+    df.loc[overlaps.shift(1, fill_value=False), "type"] = "overlapped_turn"
+
     return df
 
 
@@ -80,7 +98,8 @@ def merge_turns_with_context(
     Args:
         df: DataFrame with 'start_sec', 'end_sec', 'speaker', 'type',
             'transcription' columns.
-            'type' should be 'backchannel' or 'turn' (from classify_transcriptions).
+            'type' should be 'backchannel', 'turn', or
+                'overlapped_turn' (from classify_transcriptions).
         max_backchannel_dur: Maximum duration (seconds) for backchannels
         to allow merging across.
         max_gap_sec: Maximum time gap (seconds) between turns to consider merging.
@@ -103,13 +122,14 @@ def merge_turns_with_context(
 
         current = df.iloc[i].copy()
 
-        if current["type"] == "backchannel":
+        if current["type"] == "backchannel" or current["type"] == "overlapped_turn":
             merged.append(current)
             processed.add(i)
             continue
 
         # Current is a turn - find all consecutive same-speaker turns to merge,
-        # skipping short backchannels
+        # skipping short backchannels/overlapped turns in between,
+        # without re-applying windowed merging rules.
         speaker = current["speaker"]
         j = i + 1
 
@@ -132,7 +152,10 @@ def merge_turns_with_context(
                 between = df.iloc[i + 1 : j]
                 between = between[between["end_sec"] > current["end_sec"]]
                 can_merge = len(between) == 0 or all(
-                    (between["type"] == "backchannel")
+                    (
+                        (between["type"] == "backchannel")
+                        | (between["type"] == "overlapped_turn")
+                    )
                     & (
                         (between["end_sec"] - between["start_sec"])
                         <= max_backchannel_dur
@@ -153,7 +176,10 @@ def merge_turns_with_context(
                     continue
                 else:
                     break
-            elif next_segment["type"] == "backchannel":
+            elif (
+                next_segment["type"] == "backchannel"
+                or next_segment["type"] == "overlapped_turn"
+            ):
                 # Skip short backchannels
                 if (
                     next_segment["end_sec"] - next_segment["start_sec"]

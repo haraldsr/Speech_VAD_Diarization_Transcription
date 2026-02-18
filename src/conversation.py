@@ -38,7 +38,8 @@ def _export_to_elan_format(df: pd.DataFrame, output_path: str) -> None:
     Export DataFrame to ELAN-compatible tab-delimited format.
 
     ELAN import format: tier \t begin_ms \t end_ms \t annotation
-    Tier names combine speaker and type: P1_turn, P1_backchannel, etc.
+    Tier names combine speaker and type: P1_turn, P1_backchannel,
+        P1_overlapped_turn, etc.
 
     Args:
         df: DataFrame with speaker, start_sec, end_sec, transcription, type columns
