@@ -385,50 +385,91 @@ def compute_all_errors(
 
     return err, err_df
 
-# def compute_and_print_errors(
-#   label_dir: str,
-#   conv_id: str,
-#   annotator_id: str = "",
-#   min_overlap_ratio: float = 0.1,
-#   print_summary: bool = True,
-# ) -> dict:
-#     """
-#     Compute turn errors and optionally print a summary.
+def postprocess_turn_df(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    
+    # Replace common value variations
+    df =df.replace(
+        {
+            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
+            "type": {"T": "turn","t": "turn", "B": "backchannel", "b": "backchannel"},
+        }
+    )
 
-#     Args:
-#         label_dir: Directory containing ground truth label files.
-#         conv_id: Conversation identifier to select the appropriate label file.
-#         annotator_id: Identifier for the annotator of the labels.
-#         min_overlap_ratio: Minimum overlap ratio for matching turns.
-#         print_summary: Whether to print the error summary.
-#     Returns:
-#         Dictionary of error metrics for each turn type.
-#     """
+    # Treat "overlap" and "overlapped_turn" as "backchannel" for error analysis
+    df = df.replace(
+        {
+            "type": {"overlap": "backchannel", "overlapped_turn": "backchannel"},
+        }
+    )
 
-#     # Load manual labels
-#     df_ref = pd.read_csv(
-#         f"{label_dir}/{conv_id}{annotator_id}.txt",
-#         sep="\t",
-#         header=None,
-#         names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
-#     )
-#     # Replace common label variations and drop unused columns
-#     df_ref = df_ref.replace(
-#         {
-#             "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
-#             "type": {"t": "T", "b": "B"},
-#         }
-#     )
-#     df_ref = df_ref.drop(columns=["foo"])
+    # Treat backchannels as turns if they're not embedded in an interlocutor turn
+    speakers = ["P1", "P2"]
+    for ip in (0, 1):
+        p_bc = speakers[ip]
+        p_int = speakers[1 - ip]  # Get the other speaker
 
-#     df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
+        mask_backchannel = (df["type"] == "backchannel") & (df["speaker"] == p_bc)
+        mask_interlocutor_turn = (df["type"] == "turn") & (df["speaker"] == p_int)
 
-#     err, err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio)
+        for idx_bc in df[mask_backchannel].index:
+            t_start_bc = df.loc[idx_bc, "start_sec"]
+            t_end_bc = df.loc[idx_bc, "end_sec"]
 
-#     if print_summary:
-#         print_error_summary(err)
+            # Check if backchannel is fully contained within any interlocutor turn
+            if not np.any(
+                (mask_interlocutor_turn)
+                & (df["start_sec"] <= t_start_bc)
+                & (df["end_sec"] >= t_end_bc)
+            ):
+                df.loc[idx_bc, "type"] = "turn"
 
-#     return err
+    # Combine consecutive turns of the same speaker if no interlocutor turn between them
+    for speaker in speakers:
+        print(f"Processing speaker {speaker} for turn combination...")
+        mask_speaker_turn = (df["type"] == "turn") & (df["speaker"] == speaker)
+        print(f"Found {mask_speaker_turn.sum()} turns for speaker {speaker} before combination.")
+        df_speaker_turns = df[mask_speaker_turn].sort_values(by="start_sec")
+
+        for i in range(len(df_speaker_turns) - 1):
+            current_turn = df_speaker_turns.iloc[i]
+            next_turn = df_speaker_turns.iloc[i + 1]
+
+            # Check if there's an interlocutor turn starts and/or ends between current and next turn
+            if np.any(
+                (df["type"] == "turn")
+                & (df["speaker"] != speaker)
+                & (df["start_sec"] >= current_turn["end_sec"])
+                & (df["start_sec"] <= next_turn["start_sec"])
+            ) | np.any(
+                (df["type"] == "turn")
+                & (df["speaker"] != speaker)
+                & (df["end_sec"] >= current_turn["end_sec"])
+                & (df["end_sec"] <= next_turn["start_sec"])
+            ):
+                continue 
+            else:
+
+                # Combine turns by updating the end time of the current turn
+                df.loc[df_speaker_turns.index[i], "end_sec"] = next_turn["end_sec"]
+                df.loc[df_speaker_turns.index[i], "duration_sec"] = (
+                    df.loc[df_speaker_turns.index[i], "end_sec"]
+                    - df.loc[df_speaker_turns.index[i], "start_sec"]
+                )
+                # Mark the next turn for deletion
+                df.loc[df_speaker_turns.index[i + 1], "type"] = "delete"
+    df = df[df["type"] != "delete"].sort_values(by="start_sec").reset_index(drop=True)
+
+    df_turns = df[df["type"] == "turn"].sort_values(by="start_sec").reset_index(drop=True)
+    for i in range(len(df_turns) - 1):
+        current_turn = df_turns.iloc[i]
+        next_turn = df_turns.iloc[i + 1]
+        assert current_turn["speaker"] != next_turn["speaker"], (
+            f"Consecutive turns by same speaker found at index {i} and {i+1}."
+        )
+    return df
+
 
 
 if __name__ == "__main__":
@@ -438,17 +479,13 @@ if __name__ == "__main__":
         sep="\t",
         header=None,
         names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
-    )
-    df_ref = df_ref.replace(
-        {
-            "speaker": {"Talker1": "P1","p1":"P1", "Talker2": "P2","p2":"P2"},
-            "type": {"T": "turn", "B": "backchannel"},
-        }
-    )
-    df_ref = df_ref.drop(columns=["foo"])
+    ).drop(columns=["foo"])
 
     df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
 
-    err, err_df = compute_all_errors(df_ref, df_est, min_overlap_ratio=0.1)
+    df_ref_proc = postprocess_turn_df(df_ref)
+    df_est_proc = postprocess_turn_df(df_est)
+
+    err, err_df = compute_all_errors(df_ref_proc, df_est_proc, min_overlap_ratio=0.1)
 
     print_error_summary(err)
