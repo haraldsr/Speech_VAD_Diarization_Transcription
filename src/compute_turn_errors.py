@@ -455,34 +455,55 @@ def postprocess_turn_df(
         mask_speaker_turn = (df["type"] == "turn") & (df["speaker"] == speaker)
         print(f"Found {mask_speaker_turn.sum()} turns for speaker {speaker} before combination.")
         df_speaker_turns = df[mask_speaker_turn].sort_values(by="start_sec")
+        
 
         for i in range(len(df_speaker_turns) - 1):
+            print(f"Checking turns {i} and {i+1} for speaker {speaker}...")
+            
+            print("-----------------")
             current_turn = df_speaker_turns.iloc[i]
             next_turn = df_speaker_turns.iloc[i + 1]
 
-            # Check if there's an interlocutor turn starts and/or ends between current and next turn
-            if np.any(
-                (df["type"] == "turn")
-                & (df["speaker"] != speaker)
-                & (df["start_sec"] >= current_turn["end_sec"])
-                & (df["start_sec"] <= next_turn["start_sec"])
-            ) | np.any(
-                (df["type"] == "turn")
-                & (df["speaker"] != speaker)
-                & (df["end_sec"] >= current_turn["end_sec"])
-                & (df["end_sec"] <= next_turn["start_sec"])
-            ):
-                continue 
-            else:
+            # Check if any interlocutor turn exists between current and next turn
+            mask_interlocutor_turn = (df["type"] == "turn") & (df["speaker"] != speaker)
 
-                # Combine turns by updating the end time of the current turn
-                df.loc[df_speaker_turns.index[i], "end_sec"] = next_turn["end_sec"]
+            merge_turns = True
+            for idx_inter in df[mask_interlocutor_turn].index:
+                
+                t_start_inter = df.loc[idx_inter, "start_sec"]
+                t_end_inter = df.loc[idx_inter, "end_sec"]
+
+                if t_start_inter <= current_turn["end_sec"] and t_end_inter >= current_turn["end_sec"]:
+                    print(f"Interlocutor turn starting at {t_start_inter} crosses current turn end time. Not merging.")
+                    merge_turns = False
+                    break
+                
+                elif t_start_inter <= next_turn["start_sec"] and t_end_inter >= next_turn["start_sec"]:
+                    print(f"Interlocutor turn starting at {t_start_inter} crosses next turn start time. Not merging.")
+                    merge_turns = False
+                    break
+                
+                elif t_start_inter >= current_turn["end_sec"] and t_end_inter <= next_turn["start_sec"]:
+                    print(f"Interlocutor turn starting at {t_start_inter} is fully contained between current and next turn. Not merging.")
+                    merge_turns = False
+                    break
+                else:
+                    print(f"Interlocutor turn starting at {t_start_inter} does not cross current or next turn. Checking next interlocutor turn.")
+                   
+            print(f"After checking interlocutor turns, merge_turns={merge_turns} for turns {i} and {i+1} of speaker {speaker}.")
+            print("---")
+
+            if merge_turns:
+                print(f"No interlocutor turn crosses current or next turn. Merging turns {i} and {i+1} for speaker {speaker}.")
+                # No interlocutor turn crosses start or end, so merge turns
+                df.loc[df_speaker_turns.index[i], "end_sec"] = df_speaker_turns.iloc[i + 1]["end_sec"]
                 df.loc[df_speaker_turns.index[i], "duration_sec"] = (
                     df.loc[df_speaker_turns.index[i], "end_sec"]
                     - df.loc[df_speaker_turns.index[i], "start_sec"]
                 )
                 # Mark the next turn for deletion
                 df.loc[df_speaker_turns.index[i + 1], "type"] = "delete"
+            
     df = df[df["type"] != "delete"].sort_values(by="start_sec").reset_index(drop=True)
 
     df_turns = df[df["type"] == "turn"].sort_values(by="start_sec").reset_index(drop=True)
@@ -490,7 +511,7 @@ def postprocess_turn_df(
         current_turn = df_turns.iloc[i]
         next_turn = df_turns.iloc[i + 1]
         assert current_turn["speaker"] != next_turn["speaker"], (
-            f"Consecutive turns by same speaker found at index {i} and {i+1}."
+            f"Consecutive turns by speaker {current_turn['speaker']} found at index {i} and {i+1}."
         )
     return df
 
@@ -498,18 +519,32 @@ def postprocess_turn_df(
 
 if __name__ == "__main__":
     # Example usage
-    df_ref = pd.read_csv(
-        "demo/annotations/F1F2_quiet_food_1m_01_labels_manual_rinor.txt",
-        sep="\t",
+    # df_ref = pd.read_csv(
+    #     "demo/annotations/F1F2_quiet_food_1m_01_labels_manual_rinor.txt",
+    #     sep="\t",
+    #     header=None,
+    #     names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
+    # ).drop(columns=["foo"])
+
+    # df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
+
+    # df_ref_proc = postprocess_turn_df(df_ref)
+    # df_est_proc = postprocess_turn_df(df_est)
+
+    # err, err_df = compute_all_errors(df_ref_proc, df_est_proc, min_overlap_ratio=0.1)
+
+    # print_error_summary(err)
+
+
+    df = pd.read_csv("demo/annotations/test_labels.txt", sep="\t",
         header=None,
         names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
     ).drop(columns=["foo"])
 
-    df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
+    df_proc = postprocess_turn_df(df)
 
-    df_ref_proc = postprocess_turn_df(df_ref)
-    df_est_proc = postprocess_turn_df(df_est)
-
-    err, err_df = compute_all_errors(df_ref_proc, df_est_proc, min_overlap_ratio=0.1)
-
-    print_error_summary(err)
+    print(df)
+    print("----------------------------")
+    print(df_proc)
+    # Write to cs without header
+    df_proc.to_csv("demo/annotations/test_labels_processed.txt", sep="\t", index=False, header=False)
