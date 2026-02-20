@@ -426,6 +426,7 @@ def compute_all_errors(
 
 def postprocess_turn_df(
     df: pd.DataFrame,
+    suppress_warnings: bool = True,
 ) -> pd.DataFrame:
     
     # Replace common value variations
@@ -466,16 +467,18 @@ def postprocess_turn_df(
 
     # Combine consecutive turns of the same speaker if no interlocutor turn between them
     for speaker in speakers:
-        print(f"Processing speaker {speaker} for turn combination...")
+        if not suppress_warnings:
+            print(f"Processing speaker {speaker} for turn combination...")
         mask_speaker_turn = (df["type"] == "turn") & (df["speaker"] == speaker)
-        print(f"Found {mask_speaker_turn.sum()} turns for speaker {speaker} before combination.")
+        if not suppress_warnings:
+            print(f"Found {mask_speaker_turn.sum()} turns for speaker {speaker} before combination.")
         df_speaker_turns = df[mask_speaker_turn].sort_values(by="start_sec")
         
 
         for i in range(len(df_speaker_turns) - 1):
-            print(f"Checking turns {i} and {i+1} for speaker {speaker}...")
-            
-            print("-----------------")
+            if not suppress_warnings:
+                print(f"Checking turns {i} and {i+1} for speaker {speaker}...")
+                print("-----------------")
             current_turn = df_speaker_turns.iloc[i]
             next_turn = df_speaker_turns.iloc[i + 1]
 
@@ -489,27 +492,33 @@ def postprocess_turn_df(
                 t_end_inter = df.loc[idx_inter, "end_sec"]
 
                 if t_start_inter <= current_turn["end_sec"] and t_end_inter >= current_turn["end_sec"]:
-                    print(f"Interlocutor turn starting at {t_start_inter} crosses current turn end time. Not merging.")
+                    if not suppress_warnings:
+                        print(f"Interlocutor turn starting at {t_start_inter} crosses current turn end time. Not merging.")
                     merge_turns = False
                     break
                 
                 elif t_start_inter <= next_turn["start_sec"] and t_end_inter >= next_turn["start_sec"]:
-                    print(f"Interlocutor turn starting at {t_start_inter} crosses next turn start time. Not merging.")
+                    if not suppress_warnings:
+                        print(f"Interlocutor turn starting at {t_start_inter} crosses next turn start time. Not merging.")
                     merge_turns = False
                     break
                 
                 elif t_start_inter >= current_turn["end_sec"] and t_end_inter <= next_turn["start_sec"]:
-                    print(f"Interlocutor turn starting at {t_start_inter} is fully contained between current and next turn. Not merging.")
+                    if not suppress_warnings:
+                        print(f"Interlocutor turn starting at {t_start_inter} is fully contained between current and next turn. Not merging.")
                     merge_turns = False
                     break
                 else:
-                    print(f"Interlocutor turn starting at {t_start_inter} does not cross current or next turn. Checking next interlocutor turn.")
+                    if not suppress_warnings:
+                        print(f"Interlocutor turn starting at {t_start_inter} does not cross current or next turn. Checking next interlocutor turn.")
                    
-            print(f"After checking interlocutor turns, merge_turns={merge_turns} for turns {i} and {i+1} of speaker {speaker}.")
-            print("---")
+            if not suppress_warnings:
+                print(f"After checking interlocutor turns, merge_turns={merge_turns} for turns {i} and {i+1} of speaker {speaker}.")
+                print("---")
 
             if merge_turns:
-                print(f"No interlocutor turn crosses current or next turn. Merging turns {i} and {i+1} for speaker {speaker}.")
+                if not suppress_warnings:
+                    print(f"No interlocutor turn crosses current or next turn. Merging turns {i} and {i+1} for speaker {speaker}.")
                 # No interlocutor turn crosses start or end, so merge turns
                 df.loc[df_speaker_turns.index[i], "end_sec"] = df_speaker_turns.iloc[i + 1]["end_sec"]
                 df.loc[df_speaker_turns.index[i], "duration_sec"] = (
