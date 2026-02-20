@@ -444,26 +444,48 @@ def postprocess_turn_df(
         }
     )
 
-    # Treat backchannels as turns if they're not embedded in an interlocutor turn
+    # If a turn is fully enclosed by an interlocutor turn, treat it as overlap/backchannel.
+    # This handles mislabeled overlapped turns coming from upstream outputs.
+    turn_indices = df.index[df["type"] == "turn"]
+    for idx_turn in turn_indices:
+        speaker_turn = df.loc[idx_turn, "speaker"]
+        t_start_turn = df.loc[idx_turn, "start_sec"]
+        t_end_turn = df.loc[idx_turn, "end_sec"]
+
+        mask_interlocutor_turn = (
+            (df.index != idx_turn)
+            & (df["type"] == "turn")
+            & (df["speaker"] != speaker_turn)
+        )
+
+        enclosed_by_interlocutor = np.any(
+            mask_interlocutor_turn
+            & (df["start_sec"] <= t_start_turn)
+            & (df["end_sec"] >= t_end_turn)
+        )
+
+        if enclosed_by_interlocutor:
+            df.loc[idx_turn, "type"] = "backchannel"
+
+    # Treat backchannels as turns only when they do not overlap with
+    # any segment from the interlocutor (turn or backchannel).
+    # This avoids order-dependent promotion of overlapping backchannels.
     speakers = ["P1", "P2"]
-    for ip in (0, 1):
-        p_bc = speakers[ip]
-        p_int = speakers[1 - ip]  # Get the other speaker
+    backchannel_indices = df.index[df["type"] == "backchannel"]
+    for idx_bc in backchannel_indices:
+        speaker_bc = df.loc[idx_bc, "speaker"]
+        t_start_bc = df.loc[idx_bc, "start_sec"]
+        t_end_bc = df.loc[idx_bc, "end_sec"]
 
-        mask_backchannel = (df["type"] == "backchannel") & (df["speaker"] == p_bc)
-        mask_interlocutor_turn = (df["type"] == "turn") & (df["speaker"] == p_int)
+        mask_other_speaker = (df.index != idx_bc) & (df["speaker"] != speaker_bc)
+        overlaps_other = (
+            (df["start_sec"] < t_end_bc)
+            & (df["end_sec"] > t_start_bc)
+            & mask_other_speaker
+        )
 
-        for idx_bc in df[mask_backchannel].index:
-            t_start_bc = df.loc[idx_bc, "start_sec"]
-            t_end_bc = df.loc[idx_bc, "end_sec"]
-
-            # Check if backchannel is fully contained within any interlocutor turn
-            if not np.any(
-                (mask_interlocutor_turn)
-                & (df["start_sec"] <= t_start_bc)
-                & (df["end_sec"] >= t_end_bc)
-            ):
-                df.loc[idx_bc, "type"] = "turn"
+        if not np.any(overlaps_other):
+            df.loc[idx_bc, "type"] = "turn"
 
     # Combine consecutive turns of the same speaker if no interlocutor turn between them
     for speaker in speakers:
@@ -535,7 +557,11 @@ def postprocess_turn_df(
         current_turn = df_turns.iloc[i]
         next_turn = df_turns.iloc[i + 1]
         assert current_turn["speaker"] != next_turn["speaker"], (
-            f"Consecutive turns by speaker {current_turn['speaker']} found at index {i} and {i+1}."
+            "Consecutive turns by the same speaker are not allowed after postprocessing: "
+            f"speaker={current_turn['speaker']}, "
+            f"index_pair=({i}, {i+1}), "
+            f"times=([{current_turn['start_sec']}, {current_turn['end_sec']}], "
+            f"[{next_turn['start_sec']}, {next_turn['end_sec']}])."
         )
     return df
 
