@@ -44,6 +44,7 @@ def compute_turn_errors(
     df_ref: pd.DataFrame,
     df_est: pd.DataFrame,
     min_overlap_ratio: float,
+    suppress_warnings: bool = False,
 ) -> pd.DataFrame:
     """
     Compute turn errors between ground truth and estimated turns.
@@ -62,6 +63,7 @@ def compute_turn_errors(
             - type: Turn type identifier
         df_est: Estimated turns DataFrame with same columns as df_ref.
         min_overlap_ratio: Minimum overlap ratio required for matching turns.
+        suppress_warnings: If True, suppresses warning messages. Defaults to False.
 
     Returns:
         DataFrame with ground truth turns augmented with:
@@ -118,15 +120,17 @@ def compute_turn_errors(
 
     # Resolve multiple matches to ground truth events
     if not np.all(matches_to_ref <= 1):
-        warnings.warn("Multiple matches found for a single ground truth event.")
+        if not suppress_warnings:
+            warnings.warn("Multiple matches found for a single ground truth event.")
 
         for i_est in range(n_est):
             if matches_to_ref[i_est] > 1:
-                print(
-                    f"Ground truth event {i_est} has "
-                    f"{int(matches_to_ref[i_est])} matches."
-                )
-                print("Keeping only the closest match in terms of overlapping ratio.")
+                if not suppress_warnings:
+                    print(
+                        f"Ground truth event {i_est} has "
+                        f"{int(matches_to_ref[i_est])} matches."
+                    )
+                    print("Keeping only the closest match in terms of overlapping ratio.")
 
                 # Find best match (highest overlap ratio among matches)
                 masked_overlap = np.where(
@@ -136,19 +140,22 @@ def compute_turn_errors(
                 match_matrix[i_est, :] = False
                 match_matrix[i_est, closest_match] = True
 
-        print("----------------------------")
+        if not suppress_warnings:
+            print("----------------------------")
 
     # Resolve multiple matches to estimated events
     if not np.all(matches_to_est <= 1):
-        warnings.warn("Multiple matches found for a single estimated event.")
+        if not suppress_warnings:
+            warnings.warn("Multiple matches found for a single estimated event.")
 
         for i_ref in range(n_ref):
             if matches_to_est[i_ref] > 1:
-                print(
-                    f"Estimated event {i_ref} has "
-                    f"{int(matches_to_est[i_ref])} matches."
-                )
-                print("Keeping only the closest match in terms of overlapping ratio.")
+                if not suppress_warnings:
+                    print(
+                        f"Estimated event {i_ref} has "
+                        f"{int(matches_to_est[i_ref])} matches."
+                    )
+                    print("Keeping only the closest match in terms of overlapping ratio.")
 
                 # Find best match (highest overlap ratio among matches)
                 masked_overlap = np.where(
@@ -158,7 +165,8 @@ def compute_turn_errors(
                 match_matrix[:, i_ref] = False
                 match_matrix[closest_match, i_ref] = True
 
-        print("----------------------------")
+        if not suppress_warnings:
+            print("----------------------------")
 
     # Build error matrix with duration differences for matched turns
     duration_delta_matrix = np.full_like(duration_delta, np.nan)
@@ -223,6 +231,7 @@ def compute_turn_errors(
 
 def tabulate_floor_transfers(
     df_turns: pd.DataFrame,
+    suppress_warnings: bool = False,
 ) -> pd.DataFrame:
     """
     Extract floor transfer events from a turns table.
@@ -238,6 +247,7 @@ def tabulate_floor_transfers(
             - end_sec: Turn end time (seconds)
             - duration_sec: Turn duration (seconds)
             - type: Turn type identifier ("turn" for turns)
+        suppress_warnings: If True, suppresses warning messages. Defaults to False.
 
     Returns:
         DataFrame with floor transfer events containing:
@@ -252,7 +262,7 @@ def tabulate_floor_transfers(
     turns = turns.sort_values(by="start_sec").reset_index(drop=True)
 
     n_turns = len(turns)
-    floor_transfers = pd.DataFrame(columns=["speaker", "start_sec", "end_sec", "duration_sec", "type"])
+    floor_transfers = []  # Collect rows in a list instead of repeatedly concatenating
 
     for i_turn in range(n_turns - 1):
         speaker_current = turns.iloc[i_turn]["speaker"]
@@ -260,10 +270,11 @@ def tabulate_floor_transfers(
 
         # Floor transfers only occur between different speakers
         if speaker_current == speaker_next:
-            warnings.warn(
-                f"Consecutive turns by the same speaker found at index {i_turn}. "
-                "Expected alternating speakers for floor transfers."
-            )
+            if not suppress_warnings:
+                warnings.warn(
+                    f"Consecutive turns by the same speaker found at index {i_turn}. "
+                    "Expected alternating speakers for floor transfers."
+                )
         else:
             # Create floor transfer entry
             speakers = f"{speaker_current}-{speaker_next}"
@@ -271,18 +282,16 @@ def tabulate_floor_transfers(
             t_end = turns.iloc[i_turn + 1]["start_sec"]
             duration = t_end - t_start
 
-            floor_transfers = pd.concat([
-                floor_transfers,
-                pd.DataFrame([{
-                    "speaker": speakers,
-                    "start_sec": t_start,
-                    "end_sec": t_end,
-                    "duration_sec": duration,
-                    "type": "FTO",
-                }
-            ])], ignore_index=True)
+            floor_transfers.append({
+                "speaker": speakers,
+                "start_sec": t_start,
+                "end_sec": t_end,
+                "duration_sec": duration,
+                "type": "FTO",
+            })
 
-    df_fto = pd.DataFrame(floor_transfers)
+    # Create DataFrame from collected rows (more efficient and avoids FutureWarning)
+    df_fto = pd.DataFrame(floor_transfers) if floor_transfers else pd.DataFrame(columns=["speaker", "start_sec", "end_sec", "duration_sec", "type"])
 
     return df_fto
 
@@ -320,6 +329,7 @@ def compute_all_errors(
     df_ref: pd.DataFrame,
     df_est: pd.DataFrame,
     min_overlap_ratio: float,
+    suppress_warnings: bool = False,
 ) -> Tuple[dict, pd.DataFrame]:
     """
     Compute turn errors for both turns and floor transfers.
@@ -328,6 +338,7 @@ def compute_all_errors(
         df_ref: Ground truth turns DataFrame.
         df_est: Estimated turns DataFrame.
         min_overlap_ratio: Minimum overlap ratio for matching turns.
+        suppress_warnings: If True, suppresses warning messages. Defaults to False.
 
     Returns:
         Tuple of (metrics_dict, errors_dataframe) where metrics_dict contains
@@ -343,13 +354,13 @@ def compute_all_errors(
 
     # turn_errors_df = compute_turn_errors(df_ref, df_est, min_overlap_ratio)
 
-    df_fto_ref = tabulate_floor_transfers(df_ref)
-    df_fto_est = tabulate_floor_transfers(df_est)
+    df_fto_ref = tabulate_floor_transfers(df_ref, suppress_warnings)
+    df_fto_est = tabulate_floor_transfers(df_est, suppress_warnings)
 
     df_ref_cat = pd.concat([df_ref, df_fto_ref], ignore_index=True)
     df_est_cat = pd.concat([df_est, df_fto_est], ignore_index=True)
                            
-    err_df = compute_turn_errors(df_ref_cat, df_est_cat, min_overlap_ratio)
+    err_df = compute_turn_errors(df_ref_cat, df_est_cat, min_overlap_ratio, suppress_warnings)
 
     # err_df = pd.concat([turn_errors_df, fto_errors_df], ignore_index=True)
 
