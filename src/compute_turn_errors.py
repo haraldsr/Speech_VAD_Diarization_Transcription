@@ -308,16 +308,20 @@ def print_error_summary(err: dict) -> None:
         print(f"{type} Precision: {metrics['precision']:.2f}")
         print(f"{type} Recall: {metrics['recall']:.2f}")
         print(
-            f"{type} Mean Duration Delta (abs): "
-            f"{metrics['mean_duration_delta']:.2f} ± {metrics['std_duration_delta']:.2f} seconds"
+            f"{type} Mean Absolute Duration Delta: "
+            f"{metrics['duration_delta_mean_abs']:.2f} seconds [5%: {metrics['duration_delta_p05_abs']:.2f}s, 95%: {metrics['duration_delta_p95_abs']:.2f}s]"
         )
         print(
-            f"{type} Mean Start Delta (abs): "
-            f"{metrics['mean_start_delta']:.2f} ± {metrics['std_start_delta']:.2f} seconds"
+            f"{type} Mean Absolute Start Delta: "
+            f"{metrics['start_delta_mean_abs']:.2f} seconds [5%: {metrics['start_delta_p05_abs']:.2f}s, 95%: {metrics['start_delta_p95_abs']:.2f}s]"
         )
         print(
-            f"{type} Mean End Delta (abs): "
-            f"{metrics['mean_end_delta']:.2f} ± {metrics['std_end_delta']:.2f} seconds"
+            f"{type} Mean Absolute End Delta: "
+            f"{metrics['end_delta_mean_abs']:.2f} seconds [5%: {metrics['end_delta_p05_abs']:.2f}s, 95%: {metrics['end_delta_p95_abs']:.2f}s]"
+        )
+        print(
+            f"{type} Mean Absolute Start/End Delta: "
+            f"{metrics['start_end_delta_mean_abs']:.2f} seconds [5%: {metrics['start_end_p05_abs']:.2f}s, 95%: {metrics['start_end_p95_abs']:.2f}s]"
         )
 
 
@@ -375,36 +379,47 @@ def compute_all_errors(
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
-        detected_df = type_df[type_df["detected"] == True]  # noqa: E712
-        mean_duration_delta = (
-            detected_df["duration_delta"].abs().mean() if len(detected_df) > 0 else 0.0
-        )
-        mean_start_delta = (
-            detected_df["start_delta"].abs().mean() if len(detected_df) > 0 else 0.0
-        )
-        mean_end_delta = (
-            detected_df["end_delta"].abs().mean() if len(detected_df) > 0 else 0.0
-        )
-        
-        std_duration_delta = (
-            detected_df["duration_delta"].abs().std() if len(detected_df) > 0 else 0.0
-        )
-        std_start_delta = (
-            detected_df["start_delta"].abs().std() if len(detected_df) > 0 else 0.0
-        )
-        std_end_delta = (
-            detected_df["end_delta"].abs().std() if len(detected_df) > 0 else 0.0
-        )
+        detected_df = type_df[type_df["detected"] == True] 
+
+        duration_delta_mean_abs = detected_df["duration_delta"].abs().mean() if len(detected_df) > 0 else 0.0 
+        duration_delta_p95_abs = detected_df["duration_delta"].abs().quantile(0.95) if len(detected_df) > 0 else 0.0
+        duration_delta_p05_abs = detected_df["duration_delta"].abs().quantile(0.05) if len(detected_df) > 0 else 0.0
+
+        start_delta_mean_abs = detected_df["start_delta"].abs().mean() if len(detected_df) > 0 else 0.0
+        start_delta_p95_abs = detected_df["start_delta"].abs().quantile(0.95) if len(detected_df) > 0 else 0.0
+        start_delta_p05_abs = detected_df["start_delta"].abs().quantile(0.05) if len(detected_df) > 0 else 0.0
+
+        end_delta_mean_abs = detected_df["end_delta"].abs().mean() if len(detected_df) > 0 else 0.0
+        end_delta_p95_abs = detected_df["end_delta"].abs().quantile(0.95) if len(detected_df) > 0 else 0.0
+        end_delta_p05_abs = detected_df["end_delta"].abs().quantile(0.05) if len(detected_df) > 0 else 0.0
+
+        start_end_delta_mean_abs = np.mean(np.concatenate(
+            [detected_df["start_delta"].abs().values, detected_df["end_delta"].abs().values]
+        )) if len(detected_df) > 0 else 0.0
+
+        start_end_p95_abs = np.quantile(np.concatenate(
+            [detected_df["start_delta"].abs().values, detected_df["end_delta"].abs().values]), 0.95
+        ) if len(detected_df) > 0 else 0.0
+
+        start_end_p05_abs = np.quantile(np.concatenate(
+            [detected_df["start_delta"].abs().values, detected_df["end_delta"].abs().values]), 0.05
+        ) if len(detected_df) > 0 else 0.0
 
         err[type] = {
             "precision": precision,
             "recall": recall,
-            "mean_duration_delta": mean_duration_delta,
-            "std_duration_delta": std_duration_delta,
-            "mean_start_delta": mean_start_delta,
-            "std_start_delta": std_start_delta,
-            "mean_end_delta": mean_end_delta,
-            "std_end_delta": std_end_delta,
+            "duration_delta_mean_abs": duration_delta_mean_abs,
+            "duration_delta_p95_abs": duration_delta_p95_abs,
+            "duration_delta_p05_abs": duration_delta_p05_abs,
+            "start_delta_mean_abs": start_delta_mean_abs,
+            "end_delta_mean_abs": end_delta_mean_abs,
+            "start_delta_p95_abs": start_delta_p95_abs,
+            "start_delta_p05_abs": start_delta_p05_abs,
+            "end_delta_p95_abs": end_delta_p95_abs,
+            "end_delta_p05_abs": end_delta_p05_abs,
+            "start_end_delta_mean_abs": start_end_delta_mean_abs,
+            "start_end_p95_abs": start_end_p95_abs,
+            "start_end_p05_abs": start_end_p05_abs,
         }
 
     return err, err_df
@@ -519,32 +534,19 @@ def postprocess_turn_df(
 
 if __name__ == "__main__":
     # Example usage
-    # df_ref = pd.read_csv(
-    #     "demo/annotations/F1F2_quiet_food_1m_01_labels_manual_rinor.txt",
-    #     sep="\t",
-    #     header=None,
-    #     names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
-    # ).drop(columns=["foo"])
-
-    # df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
-
-    # df_ref_proc = postprocess_turn_df(df_ref)
-    # df_est_proc = postprocess_turn_df(df_est)
-
-    # err, err_df = compute_all_errors(df_ref_proc, df_est_proc, min_overlap_ratio=0.1)
-
-    # print_error_summary(err)
-
-
-    df = pd.read_csv("demo/annotations/test_labels.txt", sep="\t",
+    df_ref = pd.read_csv(
+        "demo/annotations/F1F2_quiet_food_1m_01_labels_manual_rinor.txt",
+        sep="\t",
         header=None,
         names=["speaker", "foo", "start_sec", "end_sec", "duration_sec", "type"],
     ).drop(columns=["foo"])
 
-    df_proc = postprocess_turn_df(df)
+    df_est = pd.read_csv("outputs/cpu/final_labels.txt", sep="\t")
 
-    print(df)
-    print("----------------------------")
-    print(df_proc)
-    # Write to cs without header
-    df_proc.to_csv("demo/annotations/test_labels_processed.txt", sep="\t", index=False, header=False)
+    df_ref_proc = postprocess_turn_df(df_ref)
+    df_est_proc = postprocess_turn_df(df_est)
+
+    err, err_df = compute_all_errors(df_ref_proc, df_est_proc, min_overlap_ratio=0.1)
+
+    print_error_summary(err)
+    print(err_df)
