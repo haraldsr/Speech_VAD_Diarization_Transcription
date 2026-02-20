@@ -426,7 +426,7 @@ def compute_all_errors(
 
 def postprocess_turn_df(
     df: pd.DataFrame,
-    suppress_warnings: bool = True,
+    suppress_warnings: bool = False,
 ) -> pd.DataFrame:
     
     # Replace common value variations
