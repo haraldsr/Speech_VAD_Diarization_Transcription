@@ -172,6 +172,7 @@ def create_turns_df_windowed(
                         bridged_opponent_indices.append(idx)
                     else:
                         merged_indices.append(idx)
+            merged_indices.extend(bridged_opponent_indices)
 
             _extend_segment(current, target["end"])
             j = target.name + 1

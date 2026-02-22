@@ -12,6 +12,12 @@ import pandas as pd
 from scipy.stats import entropy
 
 
+def _refresh_duration_sec(row: pd.Series) -> None:
+    """Update duration_sec in-place when the column exists."""
+    if "duration_sec" in row.index:
+        row["duration_sec"] = row["end_sec"] - row["start_sec"]
+
+
 def compute_entropy(text: str, by: str = "word") -> float:
     """
     Compute the entropy of a text string.
@@ -69,16 +75,22 @@ def classify_transcriptions(df: pd.DataFrame, threshold: float = 1.5) -> pd.Data
         lambda x: "backchannel" if x < threshold else "turn"
     )
 
-    overlaps = (
-        (df["type"] == "turn")
-        & (df["type"].shift(-1) == "turn")
-        & (df["speaker"] != df["speaker"].shift(-1))
-        & (df["end_sec"] >= df["end_sec"].shift(-1))
-        & (df["start_sec"] <= df["start_sec"].shift(-1))
-    )
+    # Mark turns fully contained within any other speaker's turn.
+    turns = df[df["type"] == "turn"]
+    overlapped_indices = []
 
-    # Mark the overlapped turn (next row) as "OT"
-    df.loc[overlaps.shift(1, fill_value=False), "type"] = "overlapped_turn"
+    for idx, row in turns.iterrows():
+        contained_by_other_turn = (
+            (turns.index != idx)
+            & (turns["speaker"] != row["speaker"])
+            & (turns["start_sec"] <= row["start_sec"])
+            & (turns["end_sec"] >= row["end_sec"])
+        ).any()
+
+        if contained_by_other_turn:
+            overlapped_indices.append(idx)
+
+    df.loc[overlapped_indices, "type"] = "overlapped_turn"
 
     return df
 
@@ -113,6 +125,11 @@ def merge_turns_with_context(
         )
 
     df = df.sort_values("start_sec").reset_index(drop=True)
+    
+    # Ensure transcription column exists (fill with empty strings if missing)
+    if "transcription" not in df.columns:
+        df["transcription"] = ""
+    
     merged = []
     processed = set()
 
@@ -121,6 +138,7 @@ def merge_turns_with_context(
             continue
 
         current = df.iloc[i].copy()
+        _refresh_duration_sec(current)
 
         if current["type"] == "backchannel" or current["type"] == "overlapped_turn":
             merged.append(current)
@@ -141,10 +159,10 @@ def merge_turns_with_context(
                 j += 1
                 continue
 
-            if next_segment["type"] == "turn" and next_segment["speaker"] == speaker:
+            if next_segment["speaker"] == speaker:
                 # Check if can merge
-                gap = next_segment["start_sec"] - current["end_sec"]
-                if gap > max_gap_sec:
+
+                if next_segment["start_sec"] - current["end_sec"] > max_gap_sec:
                     break
 
                 # Only check segments that extend beyond current turn
@@ -165,11 +183,12 @@ def merge_turns_with_context(
                 if can_merge:
                     # Merge
                     current["end_sec"] = next_segment["end_sec"]
-                    current["transcription"] = (
-                        current["transcription"].strip()
-                        + " "
-                        + next_segment["transcription"].strip()
-                    )
+                    # Handle transcription merging safely (convert to string, handle NaN)
+                    if "transcription" in current.index and "transcription" in next_segment.index:
+                        curr_text = str(current["transcription"]).strip() if pd.notna(current["transcription"]) else ""
+                        next_text = str(next_segment["transcription"]).strip() if pd.notna(next_segment["transcription"]) else ""
+                        current["transcription"] = (curr_text + " " + next_text).strip()
+                    _refresh_duration_sec(current)
                     # Mark the merged turn as processed
                     processed.add(j)
                     j += 1
@@ -180,7 +199,7 @@ def merge_turns_with_context(
                 next_segment["type"] == "backchannel"
                 or next_segment["type"] == "overlapped_turn"
             ):
-                # Skip short backchannels
+                # Skip short backchannels from other speakers
                 if (
                     next_segment["end_sec"] - next_segment["start_sec"]
                 ) <= max_backchannel_dur:
@@ -197,4 +216,7 @@ def merge_turns_with_context(
         # Mark i as processed
         processed.add(i)
 
-    return pd.DataFrame(merged).reset_index(drop=True)
+    out = pd.DataFrame(merged).reset_index(drop=True)
+    if "duration_sec" in out.columns:
+        out["duration_sec"] = out["end_sec"] - out["start_sec"]
+    return out
