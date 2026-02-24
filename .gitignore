@@ -63,5 +63,6 @@ protocol_revised.tex
 # Scripts folder - ignore everything except generate_uv_lock.sh
 scripts/*
 hyper/
+figures/*
 !scripts/generate_uv_lock.sh
 diar_infer_meeting.yaml
