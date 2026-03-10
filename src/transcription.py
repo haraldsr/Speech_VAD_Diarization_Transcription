@@ -248,8 +248,9 @@ def _transcribe_batch(
         for batch_idx, text in zip(file_indices, texts):
             results[batch_idx] = text
             cache_path = batch_caches[batch_idx]
-            with open(cache_path, "w", encoding="utf-8") as cache_file:
-                cache_file.write(text)
+            if cache:
+                with open(cache_path, "w", encoding="utf-8") as cache_file:
+                    cache_file.write(text)
 
         return results
 
@@ -284,8 +285,9 @@ def _transcribe_batch(
         results[batch_idx] = text
 
         cache_path = batch_caches[batch_idx]
-        with open(cache_path, "w", encoding="utf-8") as cache_file:
-            cache_file.write(text)
+        if cache:
+            with open(cache_path, "w", encoding="utf-8") as cache_file:
+                cache_file.write(text)
 
     return results
 
@@ -300,8 +302,9 @@ def transcribe_segments(
     file_prefix: Optional[str] = None,
     cache: bool = True,
     min_duration_samples: int = 1600,
-    batch_size: float | None = 30.0,
+    batch_size: Optional[float] = 30.0,
     compress: bool = True,
+    segment_padding_sec: float = 0.2,
 ) -> List[Dict[str, Any]]:
     """Run ASR on a set of time-stamped segments extracted from ``audio_path``.
 
@@ -334,11 +337,22 @@ def transcribe_segments(
         Use ``None`` or <= 0 to process all segments in one batch.
     compress
         If ``True``, saves segment WAV files as 16-bit PCM to reduce disk usage
+    segment_padding_sec
+        Context cushion added on both sides of each segment **for audio slicing
+        only**. Segment timestamps in the returned results remain unchanged.
+        The padded window is clipped to audio boundaries.
+    Notes
+        When ``cache`` is False, per-segment WAV files and any transient
+        TXT caches are removed after transcription to avoid persistent
+        intermediates and reduce disk usage.
     """
 
     os.makedirs(output_dir, exist_ok=True)
     audio, sr = sf.read(audio_path)
     prefix = file_prefix or speaker
+    total_samples = len(audio)
+    total_duration_sec = total_samples / float(sr) if sr else 0.0
+    pad_sec = max(0.0, float(segment_padding_sec))
 
     # Step 1: Extract all segments to WAV files with progress bar
     segment_info = []  # List of segment metadata dicts
@@ -349,14 +363,17 @@ def transcribe_segments(
         start = float(seg["start_sec"])
         end = float(seg["end_sec"])
         row_speaker = seg.get("speaker", speaker)
+        padded_start = max(0.0, start - pad_sec)
+        padded_end = min(total_duration_sec, end + pad_sec)
+        pad_tag = f"pad{pad_sec:.2f}".replace(".", "p")
         seg_filename = os.path.join(
             output_dir,
-            f"{prefix}_seg_{idx}_{start:.2f}_{end:.2f}.wav",
+            f"{prefix}_seg_{idx}_{start:.2f}_{end:.2f}_{pad_tag}.wav",
         )
         txt_cache = seg_filename.replace(".wav", ".txt")
 
-        start_samp = int(start * sr)
-        end_samp = int(end * sr)
+        start_samp = int(padded_start * sr)
+        end_samp = int(padded_end * sr)
         segment_audio = audio[start_samp:end_samp]
 
         # Skip segments that are too short
@@ -469,5 +486,22 @@ def transcribe_segments(
                     "transcription": transcriptions[seg_info["seg_filename"]],
                 }
             )
+
+    # If caching of transcripts is disabled, remove per-segment WAV files
+    # and any transient transcript caches to avoid consuming disk space.
+    if not cache:
+        for seg_info in valid_segments:
+            seg_filename_to_remove: Optional[str] = seg_info.get("seg_filename")
+            txt_cache_to_remove: Optional[str] = seg_info.get("txt_cache")
+            try:
+                if seg_filename_to_remove and os.path.exists(seg_filename_to_remove):
+                    os.remove(seg_filename_to_remove)
+            except OSError:
+                pass
+            try:
+                if txt_cache_to_remove and os.path.exists(txt_cache_to_remove):
+                    os.remove(txt_cache_to_remove)
+            except OSError:
+                pass
 
     return results

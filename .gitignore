@@ -64,5 +64,6 @@ protocol_revised.tex
 scripts/*
 hyper/
 figures/*
+bulk_pair_jobs/
 !scripts/generate_uv_lock.sh
 diar_infer_meeting.yaml

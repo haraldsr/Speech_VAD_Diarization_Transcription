@@ -4,6 +4,8 @@ Based on Conversational_speech_labeling_pipeline by Hanlu He.
 https://github.com/hanlululu/Conversational_speech_labeling_pipeline
 """
 
+from typing import Dict, List, Optional, Union
+
 import numpy as np
 import pandas as pd
 
@@ -29,7 +31,7 @@ def create_turns_df_windowed(
     merge_long_after_short: bool = True,
     long_merge_enabled: bool = True,
     # long_merge_min_dur: float | None = None,
-    merge_max_dur: float | None = None,
+    merge_max_dur: Optional[float] = None,
     bridge_short_opponent: bool = True,
 ) -> pd.DataFrame:
     """
@@ -66,7 +68,7 @@ def create_turns_df_windowed(
     if merge_max_dur is None:
         merge_max_dur = np.inf
 
-    turns: list[dict[str, float | str]] = []
+    turns: List[Dict[str, Union[float, str]]] = []
     n = len(segments)
     i = 0
 

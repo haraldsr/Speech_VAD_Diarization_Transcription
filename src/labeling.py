@@ -125,11 +125,11 @@ def merge_turns_with_context(
         )
 
     df = df.sort_values("start_sec").reset_index(drop=True)
-    
+
     # Ensure transcription column exists (fill with empty strings if missing)
     if "transcription" not in df.columns:
         df["transcription"] = ""
-    
+
     merged = []
     processed = set()
 
@@ -184,9 +184,20 @@ def merge_turns_with_context(
                     # Merge
                     current["end_sec"] = next_segment["end_sec"]
                     # Handle transcription merging safely (convert to string, handle NaN)
-                    if "transcription" in current.index and "transcription" in next_segment.index:
-                        curr_text = str(current["transcription"]).strip() if pd.notna(current["transcription"]) else ""
-                        next_text = str(next_segment["transcription"]).strip() if pd.notna(next_segment["transcription"]) else ""
+                    if (
+                        "transcription" in current.index
+                        and "transcription" in next_segment.index
+                    ):
+                        curr_text = (
+                            str(current["transcription"]).strip()
+                            if pd.notna(current["transcription"])
+                            else ""
+                        )
+                        next_text = (
+                            str(next_segment["transcription"]).strip()
+                            if pd.notna(next_segment["transcription"])
+                            else ""
+                        )
                         current["transcription"] = (curr_text + " " + next_text).strip()
                     _refresh_duration_sec(current)
                     # Mark the merged turn as processed

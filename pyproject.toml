@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "pyannote.audio>=4.0.0",
+  "pyannote.metrics>=4.0.0",
+  "jiwer>=3.0.0",
+  "sacrebleu>=2.0.0",
   "speechbrain>=1.0.0",
   "transformers>=4.48.0",
   "tokenizers>=0.21.0",
@@ -22,6 +25,7 @@ dependencies = [
   "numpy>=1.25.0",
   "scipy>=1.11.0",
   "pandas>=2.2.0",
+  "intervaltree>=3.1.0",
   "datasets>=4.0.0",
   "huggingface-hub>=0.36.0",
   "pyyaml>=6.0",

@@ -7,7 +7,7 @@ https://github.com/hanlululu/Conversational_speech_labeling_pipeline
 import json
 import os
 import warnings
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torchaudio
@@ -76,8 +76,8 @@ class SpeechActivityDetector:
     def __init__(
         self,
         vad_type: str = "rvad",
-        auth_token: str | None = None,
-        device: str | None = None,
+        auth_token: Optional[str] = None,
+        device: Optional[str] = None,
         rvad_threshold: float = 0.4,
     ) -> None:
         """

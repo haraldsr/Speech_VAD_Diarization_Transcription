@@ -18,6 +18,7 @@ dependencies:
   - pip:
     # Core Speech & Audio Processing
     - pyannote.audio>=4.0.0
+    - pyannote.metrics>=4.0.0
     - speechbrain>=1.0.0
     - transformers>=4.48.0
     - tokenizers>=0.21.0
@@ -28,6 +29,8 @@ dependencies:
     
     # Text processing utilities
     - text-unidecode>=1.3
+    - jiwer>=3.0.0
+    - sacrebleu>=2.0.0
     
     # Audio I/O
     - soundfile>=0.12.0
@@ -49,6 +52,7 @@ dependencies:
     - numpy>=1.25.0
     - scipy>=1.11.0
     - pandas>=2.2.0
+    - intervaltree>=3.1.0
     
     # Machine Learning
     - scikit-learn>=1.0.0
@@ -66,6 +70,10 @@ dependencies:
     - tqdm>=4.65.0
     - rich>=14.0.0
     - ipywidgets>=8.0.0
+
+    # Environment Configuration
+    - python-dotenv>=1.0.0
+
     
     # Development tools (optional)
     - black>=23.0.0
@@ -77,3 +85,6 @@ dependencies:
     # Tools for estimating CO2: codecarbon or carbontracker
     - codecarbon>=2.2.0
     - carbontracker>=1.5.0
+
+    # Local GUI (optional)
+    - streamlit>=1.35.0

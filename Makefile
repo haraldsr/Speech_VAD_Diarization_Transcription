@@ -11,8 +11,8 @@ help:
 	@echo ""
 	@echo "  make gen-lock        - Generate lockfile (auto-names based on GPU detection)"
 	@echo ""
-	@echo "  make lint            - Run linting (ruff)"
-	@echo "  make format          - Format code (ruff + isort)"
+	@echo "  make lint            - Run linting (flake8, isort, black, mypy)"
+	@echo "  make format          - Format code (isort + black)"
 	@echo "  make clean           - Remove build artifacts and cache"
 
 install:
