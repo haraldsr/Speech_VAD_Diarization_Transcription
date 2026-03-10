@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
-
 from typing_extensions import TypeGuard
 
 
@@ -112,9 +111,7 @@ def _stage_metrics(results: Mapping[str, Any]) -> Dict[str, List[Tuple[str, floa
             ("Recall", seg.get("segmentation_recall", seg.get("recall"))),
             ("F-measure", seg.get("segmentation_f_measure", seg.get("f_measure"))),
         ]
-        stage_data["Segmentation"] = [
-            (k, float(v)) for k, v in metrics if _is_number(v)
-        ]
+        stage_data["Segmentation"] = [(k, float(v)) for k, v in metrics if _is_number(v)]
 
     tr = results.get("transcription")
     if isinstance(tr, Mapping):
@@ -135,9 +132,7 @@ def _stage_metrics(results: Mapping[str, Any]) -> Dict[str, List[Tuple[str, floa
             ("MER norm", norm.get("mer")),
             ("Semantic dist", norm.get("semantic_distance")),
         ]
-        stage_data["Transcription"] = [
-            (k, float(v)) for k, v in metrics if _is_number(v)
-        ]
+        stage_data["Transcription"] = [(k, float(v)) for k, v in metrics if _is_number(v)]
 
     lt = results.get("label_type")
     if isinstance(lt, Mapping):
@@ -191,11 +186,7 @@ def _plot_kpis(
     rows_per_panel = [len(grouped[key]) for key, _ in non_empty]
     total_rows = sum(rows_per_panel)
     max_label_len = max(
-        (
-            len(f"{stage}: {metric}")
-            for rows in grouped.values()
-            for stage, metric, _ in rows
-        ),
+        (len(f"{stage}: {metric}") for rows in grouped.values() for stage, metric, _ in rows),
         default=24,
     )
     # Height allocation follows panel row counts directly.
@@ -228,7 +219,8 @@ def _plot_kpis(
                 present_stages.append(s)
     Patch = __import__("matplotlib.patches", fromlist=["Patch"]).Patch
     legend_handles = [
-        Patch(facecolor=stage_colors.get(s, "#4C78A8"), label=s) for s in present_stages
+        Patch(facecolor=stage_colors.get(s, "#4C78A8"), label=s)
+        for s in present_stages
     ]
 
     for ax, (bucket, title) in zip(axes_flat, non_empty):
@@ -278,7 +270,7 @@ def _plot_kpis(
             bbox_to_anchor=(0.5, 0.98),
             ncol=max(2, min(5, len(legend_handles))),
             frameon=False,
-            fontsize=14,
+            fontsize=14
         )
 
     # tighten the reserved top margin so plots sit closer to the legend
@@ -349,12 +341,7 @@ def _extract_per_speaker_stage_metrics(
             _add(str(spk), "Transcription", "WER norm", norm.get("wer"))
             _add(str(spk), "Transcription", "CER norm", norm.get("cer"))
             _add(str(spk), "Transcription", "MER norm", norm.get("mer"))
-            _add(
-                str(spk),
-                "Transcription",
-                "Semantic dist",
-                norm.get("semantic_distance"),
-            )
+            _add(str(spk), "Transcription", "Semantic dist", norm.get("semantic_distance"))
 
     return {k: v for k, v in per_speaker.items() if v}
 
@@ -382,9 +369,7 @@ def _plot_kpis_per_speaker(
 
     speakers = sorted([str(s) for s in speaker_metrics.keys()])
     hatch_cycle = ["///", "\\\\", "xx", "..", "++", "oo", "--", "**"]
-    speaker_hatches = {
-        spk: hatch_cycle[i % len(hatch_cycle)] for i, spk in enumerate(speakers)
-    }
+    speaker_hatches = {spk: hatch_cycle[i % len(hatch_cycle)] for i, spk in enumerate(speakers)}
 
     # No aggregate baseline: per-speaker plot focuses on individual speakers only
     metric_groups: Dict[Tuple[str, str], Dict[str, float]] = {}
@@ -443,9 +428,7 @@ def _plot_kpis_per_speaker(
     # Dynamic sizing:
     # - proportional to metric rows and actual bars
     # - slightly boosted for many speakers to keep labels/hatches readable
-    fig_h = max(
-        9.5, 3.2 + (0.50 * total_rows) + (0.035 * total_bars) + (0.18 * entity_count)
-    )
+    fig_h = max(9.5, 3.2 + (0.50 * total_rows) + (0.035 * total_bars) + (0.18 * entity_count))
     fig_w = min(24.0, max(16.0, 13.0 + 0.06 * max_label_len + 0.35 * entity_count))
     fig, axes = plt.subplots(
         n_panels,
@@ -461,9 +444,7 @@ def _plot_kpis_per_speaker(
         labels = [f"{stage}: {metric}" for stage, metric, _ in rows]
         entity_order = speakers
         active_entities = [
-            e
-            for e in entity_order
-            if any(e in entity_vals for _, _, entity_vals in rows)
+            e for e in entity_order if any(e in entity_vals for _, _, entity_vals in rows)
         ]
         n_entities = max(1, len(active_entities))
         band = 0.82
@@ -539,9 +520,7 @@ def _plot_kpis_per_speaker(
         if any(stage == s for vals in speaker_metrics.values() for stage, _, _ in vals)
     ]
     speaker_handles = [
-        Patch(
-            facecolor="white", edgecolor="black", hatch=speaker_hatches[spk], label=spk
-        )
+        Patch(facecolor="white", edgecolor="black", hatch=speaker_hatches[spk], label=spk)
         for spk in speakers
     ]
 
@@ -560,7 +539,7 @@ def _plot_kpis_per_speaker(
             bbox_to_anchor=(0.5, 0.97),
             ncol=max(2, min(6, len(handles))),
             frameon=False,
-            fontsize=14,
+            fontsize=14
         )
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
