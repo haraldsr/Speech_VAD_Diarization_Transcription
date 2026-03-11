@@ -101,6 +101,12 @@ pip install -e .
 The easiest way to run the pipeline is via the interactive web interface:
 
 ```bash
+make app
+```
+
+Alternatively, you can launch the Streamlit app directly:
+
+```bash
 streamlit run app_gui.py
 ```
 
