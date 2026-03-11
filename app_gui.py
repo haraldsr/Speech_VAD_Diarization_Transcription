@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import inspect
+import math
 import os
 import re
 import sys
@@ -41,6 +42,10 @@ except ImportError:
 from src.audio_preprocessing import (  # noqa: E402
     _PROFILES,
     PreprocessConfig,
+    _apply_highpass,
+    _apply_loudness_norm,
+    _apply_noise_reduction,
+    _apply_peak_limit,
     analyse_audio,
     auto_profile,
     load_audio,
@@ -72,8 +77,15 @@ _UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 # ── Thread-safe stdout capture ────────────────────────────────────────────────
+_ANSI_ESC = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 class _LineCapture:
-    """Writable object that appends non-empty stripped lines to a list."""
+    """Writable object that appends non-empty stripped lines to a list.
+
+    Handles both \\n (normal stdout) and \\r (tqdm progress-bar updates)
+    and strips ANSI escape codes so the log stays readable in a code block.
+    """
 
     def __init__(self, target: list[str]) -> None:
         self._target = target
@@ -82,25 +94,53 @@ class _LineCapture:
 
     def write(self, text: str) -> int:
         self._buf += text
+        # Split on \n, but preserve \r for in-place tqdm updates
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
+            # Handle \r within this segment (tqdm progress update)
+            if "\r" in line:
+                # tqdm sends: "progress text\r" to update in-place
+                # Take only the last part after the last \r
+                parts = line.split("\r")
+                line = parts[-1]
+            line = _ANSI_ESC.sub("", line).strip()
             if line:
                 with self._lock:
-                    self._target.append(line)
+                    # Replace previous tqdm progress line if it matches the same batch
+                    if (
+                        self._target
+                        and self._target[-1].startswith("Transcribing")
+                        and line.startswith("Transcribing")
+                    ):
+                        self._target[-1] = line
+                    else:
+                        self._target.append(line)
         return len(text)
 
     def flush(self) -> None:
         if self._buf:
-            with self._lock:
-                self._target.append(self._buf)
+            line = _ANSI_ESC.sub("", self._buf).strip()
+            if line:
+                with self._lock:
+                    self._target.append(line)
             self._buf = ""
+
+    # tqdm/logging may check for these
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    @property
+    def errors(self) -> str:
+        return "replace"
 
 
 def _pipeline_worker(kwargs: dict, shared: dict) -> None:
-    """Background thread: run process_conversation, capture stdout."""
+    """Background thread: run process_conversation, capture stdout+stderr."""
     capture = _LineCapture(shared["log_lines"])
-    old_stdout = sys.stdout
+    old_stdout, old_stderr = sys.stdout, sys.stderr
     sys.stdout = capture
+    sys.stderr = capture
     try:
         result = process_conversation(**kwargs)
         shared["result"] = result
@@ -111,14 +151,16 @@ def _pipeline_worker(kwargs: dict, shared: dict) -> None:
     finally:
         capture.flush()
         sys.stdout = old_stdout
+        sys.stderr = old_stderr
         shared["done"] = True
 
 
 def _continue_worker(kwargs: dict, shared: dict) -> None:
-    """Background thread: run continue_conversation, capture stdout."""
+    """Background thread: run continue_conversation, capture stdout+stderr."""
     capture = _LineCapture(shared["log_lines"])
-    old_stdout = sys.stdout
+    old_stdout, old_stderr = sys.stdout, sys.stderr
     sys.stdout = capture
+    sys.stderr = capture
     try:
         result = continue_conversation(**kwargs)
         shared["result"] = result
@@ -129,6 +171,7 @@ def _continue_worker(kwargs: dict, shared: dict) -> None:
     finally:
         capture.flush()
         sys.stdout = old_stdout
+        sys.stderr = old_stderr
         shared["done"] = True
 
 
@@ -190,35 +233,216 @@ def _compute_output_dir_suggestion(
     return f"outputs/{subdir}/{name}"
 
 
+def _derive_smart_config(
+    stats: dict,
+    base: PreprocessConfig,
+    snr_after_hpf: float | None = None,
+) -> tuple[PreprocessConfig, list[str]]:
+    """Derive a PreprocessConfig from audio diagnostics with human-readable reasons.
+
+    snr_after_hpf: SNR measured after 60 Hz HPF (used to decide on noise reduction).
+    """
+    lufs = stats.get("lufs")
+    snr = stats.get("snr_estimate_db")
+    peak = stats.get("peak_db", 0.0)
+    reasons: list[str] = []
+
+    needs_ln = lufs is not None and (lufs < -35 or lufs > -18)
+    if lufs is None:
+        reasons.append("- Loudness Norm: ✗ (loudness could not be measured)")
+    elif needs_ln:
+        tag = "too quiet" if lufs < -35 else "very loud"
+        reasons.append(
+            f"- Loudness Norm: ✓ (LUFS = {lufs:.1f}, {tag} — target −23 LUFS)"
+        )
+    else:
+        reasons.append(
+            f"- Loudness Norm: ✗ (LUFS = {lufs:.1f}, within −35 to −18 range)"
+        )
+
+    reasons.append(
+        "- High-Pass Filter: ✓ (always — removes rumble, hum, wind; most real-world noise is <60 Hz)"
+    )
+
+    # Check SNR after HPF if available; fall back to raw SNR
+    snr_for_nr = snr_after_hpf if snr_after_hpf is not None else snr
+    needs_nr = snr_for_nr is not None and snr_for_nr < 18
+    if snr_for_nr is None:
+        reasons.append("- Noise Reduction: ✗ (SNR could not be measured)")
+    elif needs_nr:
+        context = "after HPF" if snr_after_hpf is not None else "(raw)"
+        reasons.append(
+            f"- Noise Reduction: ✓ (SNR {context} = {snr_for_nr:.1f} dB, below 18 dB threshold)"
+        )
+    else:
+        context = "after HPF" if snr_after_hpf is not None else "(raw)"
+        reasons.append(
+            f"- Noise Reduction: ✗ (SNR {context} = {snr_for_nr:.1f} dB, clean)"
+        )
+
+    needs_peak = (peak is not None and peak > -6.0) or needs_ln
+    if needs_peak:
+        if peak is not None and peak > -6.0:
+            reasons.append(
+                f"- Peak Limiter: ✓ (peak = {peak:.1f} dBFS, risk of clipping)"
+            )
+        else:
+            reasons.append(
+                "- Peak Limiter: ✓ (Loudness Norm applied — prevents boost clipping)"
+            )
+    else:
+        p_str = f"{peak:.1f}" if peak is not None else "N/A"
+        reasons.append(f"- Peak Limiter: ✗ (peak = {p_str} dBFS, safe)")
+
+    cfg = PreprocessConfig(
+        enabled=True,
+        loudness_norm=needs_ln,
+        target_lufs=-23.0,
+        auto_loudness=True,
+        loudness_tolerance_db=3.0,
+        highpass=True,
+        highpass_freq=60.0,
+        noise_reduce=needs_nr,
+        noise_reduce_stationary=True,
+        noise_reduce_prop_decrease=0.8 if needs_nr else 0.5,
+        peak_limit=needs_peak,
+        peak_ceiling=0.95,
+    )
+    return cfg, reasons
+
+
+@st.cache_data
+def _compute_step_previews(
+    audio_key: str,
+    _audio: Any,
+    sr: int,
+    apply_ln: bool,
+    ln_target: float,
+    apply_hpf: bool,
+    hpf_freq: float,
+    apply_nr: bool,
+    nr_stationary: bool,
+    nr_prop: float,
+    apply_peak: bool,
+    peak_ceiling: float,
+) -> list[dict]:
+    """Return cumulative audio metrics at each active processing step (cached).
+
+    ``audio_key`` drives cache invalidation; ``_audio`` (underscore prefix) is
+    the numpy array and is not hashed by :func:`st.cache_data`.
+    """
+
+    def _fmt(v: float | None, metric_type: str) -> str:
+        """Format metric with color indicator based on metric type.
+
+        metric_type: 'lufs', 'snr', or 'peak'.
+        """
+        if v is None:
+            return "N/A"
+        if metric_type == "lufs":
+            # Loudness: safe range is -35 to -18 LUFS
+            if v < -35:
+                icon = "🔴"  # too quiet
+            elif v > -18:
+                icon = "🟡"  # too loud
+            else:
+                icon = "🟢"  # normal
+        elif metric_type == "snr":
+            # SNR: higher is better
+            if v < 18:
+                icon = "🔴"  # noisy
+            elif v < 25:
+                icon = "🟡"  # moderate
+            else:
+                icon = "🟢"  # clean
+        else:  # peak
+            # Peak dBFS: lower (more negative) is safer, 0 is clipping
+            if v < -6.0:
+                icon = "🟢"  # safe
+            elif v < -1.0:
+                icon = "🟡"  # warning
+            else:
+                icon = "🔴"  # danger
+        return f"{v:.1f} {icon}"
+
+    def _row(label: str, a: Any) -> dict:
+        s = analyse_audio(a, sr)
+        lufs = s.get("lufs")
+        snr = s.get("snr_estimate_db")
+        peak = s.get("peak_db", 0.0)
+        return {
+            "Step": label,
+            "Loudness (LUFS)": _fmt(lufs, "lufs"),
+            "SNR (dB)": _fmt(snr, "snr"),
+            "Peak (dBFS)": _fmt(peak, "peak"),
+        }
+
+    current = _audio.copy()
+    rows = [_row("① Raw (no processing)", current)]
+
+    if apply_ln:
+        current = _apply_loudness_norm(current, sr, target_lufs=ln_target)
+        rows.append(_row(f"② + Loudness Norm (→ {ln_target:.0f} LUFS)", current))
+
+    if apply_hpf:
+        current = _apply_highpass(current, sr, cutoff_hz=hpf_freq)
+        rows.append(_row(f"③ + HPF ({hpf_freq:.0f} Hz)", current))
+
+    if apply_nr:
+        current = _apply_noise_reduction(
+            current, sr, stationary=nr_stationary, prop_decrease=nr_prop
+        )
+        rows.append(_row(f"④ + Noise Red. ({nr_prop:.0%} strength)", current))
+
+    if apply_peak:
+        current = _apply_peak_limit(current, ceiling=peak_ceiling)
+        _pk_db = 20.0 * math.log10(max(peak_ceiling, 1e-10))
+        rows.append(_row(f"⑤ + Peak Limiter (≤ {_pk_db:.1f} dBFS)", current))
+
+    return rows
+
+
 def _render_preprocessing_profile(
     key_prefix: str,
     auto_config: Any,
     default_config: Any,
     title: str = "",
+    default_profile_key: str = "auto",
+    speaker_audio: dict | None = None,
 ) -> tuple[bool, Any]:
     """Render a preprocessing profile picker and return (enabled, PreprocessConfig).
 
     key_prefix: unique widget-key namespace (e.g. "" for single, "mild_" / "strong_").
     title: optional sub-header shown above the profile radio.
+    default_profile_key: which profile to pre-select ("auto", "vad", "clean", "moderate", "noisy", "manual").
+    speaker_audio: per-speaker audio data for the live impact preview (optional).
     """
     if title:
         st.markdown(f"**{title}**")
 
     profile_options = {
         "Auto-detect": "auto",
+        "VAD (HPF only)": "vad",
         "Clean": "clean",
         "Moderate": "moderate",
         "Noisy": "noisy",
         "Manual": "manual",
     }
+    _profile_keys = list(profile_options.keys())
+    _default_idx = next(
+        (i for i, v in enumerate(profile_options.values()) if v == default_profile_key),
+        0,
+    )
     selected_profile = st.radio(
         "Select preprocessing profile",
-        list(profile_options.keys()),
+        _profile_keys,
+        index=_default_idx,
         horizontal=True,
         key=f"{key_prefix}profile",
         help=(
             "**Auto-detect**: Analyzes LUFS and SNR to choose optimal settings. "
-            "**Clean**: Minimal processing (HPF only). Assumed SNR > 25 dB. "
+            "**VAD (HPF only)**: High-pass filter only — safe for VAD/diarization inputs. "
+            "**Clean**: HPF + mild loudness norm + peak limit. "
             "**Moderate**: Standard processing for typical recordings. "
             "**Noisy**: Aggressive enhancement for poor recordings with SNR < 18 dB. "
             "**Manual**: Full control over each parameter."
@@ -227,7 +451,19 @@ def _render_preprocessing_profile(
     profile_key = profile_options[selected_profile]
 
     if profile_key == "auto":
-        cfg = auto_config if auto_config else default_config
+        if speaker_audio:
+            _first_data = next(iter(speaker_audio.values()))
+            cfg, _reasons = _derive_smart_config(
+                _first_data.get("stats", {}),
+                auto_config or default_config,
+                snr_after_hpf=_first_data.get("snr_after_hpf"),
+            )
+            with st.expander("Why these settings?", expanded=True):
+                st.markdown(
+                    "Settings derived from your audio:\n\n" + "\n".join(_reasons)
+                )
+        else:
+            cfg = auto_config if auto_config else default_config
         enabled = st.checkbox(
             "Enable preprocessing",
             value=True,
@@ -241,7 +477,37 @@ def _render_preprocessing_profile(
             key=f"{key_prefix}enable",
             help="Apply custom preprocessing pipeline.",
         )
-        hp_col, nr_col, ln_col, pl_col = st.columns(4)
+        ln_col, hp_col, nr_col, pl_col = st.columns(4)
+
+        with ln_col:
+            with st.expander("Loudness Norm.", expanded=False):
+                ln_enabled = st.checkbox(
+                    "Enable",
+                    value=auto_config.loudness_norm,
+                    key=f"{key_prefix}ln_enable",
+                    help="Normalise to target LUFS (EBU R 128).",
+                )
+                ln_target = st.slider(
+                    "Target (LUFS)",
+                    -40,
+                    -10,
+                    int(auto_config.target_lufs),
+                    key=f"{key_prefix}ln_target",
+                )
+                ln_auto = st.checkbox(
+                    "Auto (skip if close)",
+                    value=auto_config.auto_loudness,
+                    key=f"{key_prefix}ln_auto",
+                    help="Skip normalisation if already within tolerance.",
+                )
+                ln_tol = st.slider(
+                    "Tolerance (dB)",
+                    0.5,
+                    10.0,
+                    float(auto_config.loudness_tolerance_db),
+                    0.5,
+                    key=f"{key_prefix}ln_tol",
+                )
 
         with hp_col:
             with st.expander("High-Pass Filter", expanded=False):
@@ -282,36 +548,6 @@ def _render_preprocessing_profile(
                     0.05,
                     key=f"{key_prefix}nr_prop",
                     help="0.0 = none, 1.0 = aggressive.",
-                )
-
-        with ln_col:
-            with st.expander("Loudness Norm.", expanded=False):
-                ln_enabled = st.checkbox(
-                    "Enable",
-                    value=auto_config.loudness_norm,
-                    key=f"{key_prefix}ln_enable",
-                    help="Normalise to target LUFS (EBU R 128).",
-                )
-                ln_target = st.slider(
-                    "Target (LUFS)",
-                    -40,
-                    -10,
-                    int(auto_config.target_lufs),
-                    key=f"{key_prefix}ln_target",
-                )
-                ln_auto = st.checkbox(
-                    "Auto (skip if close)",
-                    value=auto_config.auto_loudness,
-                    key=f"{key_prefix}ln_auto",
-                    help="Skip normalisation if already within tolerance.",
-                )
-                ln_tol = st.slider(
-                    "Tolerance (dB)",
-                    0.5,
-                    10.0,
-                    float(auto_config.loudness_tolerance_db),
-                    0.5,
-                    key=f"{key_prefix}ln_tol",
                 )
 
         with pl_col:
@@ -355,6 +591,42 @@ def _render_preprocessing_profile(
         )
         preset_dict = _PROFILES[profile_key]
         cfg = PreprocessConfig(enabled=enabled, **preset_dict)
+
+    # ── Live processing impact ────────────────────────────────────────────────
+    if speaker_audio:
+        import pandas as pd
+
+        with st.expander(
+            "📊 Live processing impact (updates with settings)",
+            expanded=True,
+        ):
+            for _spk_name, _sd in speaker_audio.items():
+                if len(speaker_audio) > 1:
+                    st.caption(f"Speaker: {_spk_name}")
+                _aud = _sd.get("audio")
+                if _aud is None:
+                    st.caption(f"No audio loaded for {_spk_name}.")
+                    continue
+                _sr_v = _sd["sr"]
+                _rows = _compute_step_previews(
+                    audio_key=_sd["audio_key"],
+                    _audio=_aud,
+                    sr=_sr_v,
+                    apply_ln=cfg.loudness_norm,
+                    ln_target=cfg.target_lufs,
+                    apply_hpf=cfg.highpass,
+                    hpf_freq=cfg.highpass_freq,
+                    apply_nr=cfg.noise_reduce,
+                    nr_stationary=cfg.noise_reduce_stationary,
+                    nr_prop=cfg.noise_reduce_prop_decrease,
+                    apply_peak=cfg.peak_limit,
+                    peak_ceiling=cfg.peak_ceiling,
+                )
+                st.dataframe(
+                    pd.DataFrame(_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     return enabled, cfg
 
@@ -926,10 +1198,21 @@ def main() -> None:
                     _audio, _sr = load_audio(_spk_path)
                     _stats = analyse_audio(_audio, _sr)
                     _pname, _pcfg = auto_profile(_audio, _sr)
+                    # Estimate SNR after HPF (in-memory preview — no file I/O)
+                    try:
+                        _audio_hpf = _apply_highpass(_audio, _sr, cutoff_hz=60.0)
+                        _snr_hpf = analyse_audio(_audio_hpf, _sr).get("snr_estimate_db")
+                    except Exception:
+                        _snr_hpf = None
+                    _audio_key = f"{_spk}_{len(_audio)}_{_sr}"
                     all_speaker_stats[_spk] = {
                         "stats": _stats,
                         "auto_profile": _pname,
                         "auto_config": _pcfg,
+                        "snr_after_hpf": _snr_hpf,
+                        "audio": _audio,
+                        "sr": _sr,
+                        "audio_key": _audio_key,
                     }
                 except Exception:
                     st.warning(f"Could not analyse [{_spk}].")
@@ -941,156 +1224,181 @@ def main() -> None:
         if all_speaker_stats:
             import pandas as pd
 
-            st.subheader("Audio Quality Assessment (Per Speaker)")
+            st.subheader("Audio Quality Diagnostic")
             _diag_rows = []
             for _spk, _spk_data in all_speaker_stats.items():
                 _s = _spk_data["stats"]
                 _lufs = _s.get("lufs")
                 _snr = _s.get("snr_estimate_db")
+                _peak = _s.get("peak_db", 0.0)
+                _snr_hpf = _spk_data.get("snr_after_hpf")
+
+                # Loudness (LUFS) with embedded recommendation
+                if _lufs is None:
+                    _lufs_disp = "N/A"
+                elif _lufs < -35:
+                    _lufs_disp = f"{_lufs:.1f} LUFS 🔴\n(too quiet → Loudness Norm)"
+                elif _lufs > -18:
+                    _lufs_disp = f"{_lufs:.1f} LUFS 🟡\n(very loud → Peak Limiter)"
+                else:
+                    _lufs_disp = f"{_lufs:.1f} LUFS 🟢\n(normal)"
+
+                # Noise (SNR) with embedded recommendation
+                if _snr is None:
+                    _snr_disp = "N/A"
+                elif _snr < 18:
+                    _snr_disp = f"{_snr:.1f} dB 🔴\n(noisy → HPF + Noise Red.)"
+                elif _snr < 25:
+                    _snr_disp = f"{_snr:.1f} dB 🟡\n(moderate → HPF + optional NR)"
+                else:
+                    _snr_disp = f"{_snr:.1f} dB 🟢\n(clean)"
+
+                # SNR after HPF estimate
+                if _snr_hpf is not None and _snr is not None:
+                    _delta = _snr_hpf - _snr
+                    _snr_hpf_disp = f"~{_snr_hpf:.1f} dB\n(−{_delta:.1f} dB change)"
+                else:
+                    _snr_hpf_disp = "N/A"
+
+                # Peak level (dBFS) with embedded recommendation
+                if _peak > -1.0:
+                    _peak_disp = f"{_peak:.1f} dBFS 🔴\n(clipping → Peak Limiter)"
+                elif _peak > -6.0:
+                    _peak_disp = f"{_peak:.1f} dBFS 🟡\n(high → consider Peak Limiter)"
+                else:
+                    _peak_disp = f"{_peak:.1f} dBFS 🟢\n(safe)"
+
                 _diag_rows.append(
                     {
                         "Speaker": _spk,
-                        "Duration (s)": f"{_s.get('duration_sec', 0):.0f}",
-                        "LUFS": f"{_lufs:.1f}" if _lufs is not None else "N/A",
-                        "SNR (dB)": f"{_snr:.1f}" if _snr is not None else "N/A",
-                        "Peak (dBFS)": f"{_s.get('peak_db', 0):.1f}",
+                        "Loudness (LUFS)": _lufs_disp,
+                        "Noise Level (SNR)": _snr_disp,
+                        "SNR after 60 Hz HPF": _snr_hpf_disp,
+                        "Peak Level (dBFS)": _peak_disp,
                         "Auto Profile": _spk_data["auto_profile"].capitalize(),
                     }
                 )
-            st.dataframe(pd.DataFrame(_diag_rows), width="stretch", hide_index=True)
-            st.caption(
-                "LUFS: Clean > −26, Noisy < −35 | SNR: Clean > 25 dB, Noisy < 18 dB. "
-                "Auto Profile evaluated independently per speaker."
+            st.dataframe(
+                pd.DataFrame(_diag_rows), use_container_width=True, hide_index=True
             )
+            with st.expander("📖 How metrics relate to processing", expanded=False):
+                st.markdown(
+                    "**What each metric means and how processing fixes it:**\n\n"
+                    "- **Loudness (LUFS):** EBU R 128 integrated loudness. Target is −23 LUFS. "
+                    "Too quiet (<−35) or too loud (>−18) is fixed by *Loudness Normalisation*.\n\n"
+                    "- **Noise Level (SNR):** Speech-to-noise ratio. >25 dB = clean, 18–25 = moderate, "
+                    "<18 = noisy. Fixed by *High-Pass Filter* and/or *Noise Reduction*.\n\n"
+                    "- **SNR after 60 Hz HPF:** In-memory estimate of SNR after high-pass filtering. "
+                    "Most real-world noise (rumble, AC hum, traffic, HVAC) is heavily concentrated "
+                    "below 60 Hz. Removing it can dramatically improve SNR without affecting speech "
+                    "(which lives in 80–300 Hz range). If SNR jumps into clean range after HPF alone, "
+                    "no further noise reduction is needed.\n\n"
+                    "- **Peak Level (dBFS):** The loudest sample in the audio. 0 dBFS = digital "
+                    "full-scale (amplitude 1.0); ceiling ~−0.4 dBFS (amplitude 0.95) prevents "
+                    "clipping. Fixed by *Peak Limiter*.\n\n"
+                    "**Processing order (in audio chain):**\n"
+                    "1. Loudness Normalisation → sets absolute loudness level\n"
+                    "2. High-Pass Filter → removes rumble and noise floor\n"
+                    "3. Noise Reduction → reduces stationary/adaptive noise\n"
+                    "4. Peak Limiter → hard-clips excess peaks to prevent digital clipping"
+                )
+
+        # Build per-speaker audio data for live impact preview
+        _speaker_audio: dict | None = (
+            {
+                _spk: {
+                    "audio": _sd.get("audio"),
+                    "sr": _sd.get("sr", 16000),
+                    "audio_key": _sd.get("audio_key", _spk),
+                    "stats": _sd["stats"],
+                }
+                for _spk, _sd in all_speaker_stats.items()
+                if _sd.get("audio") is not None
+            }
+            if all_speaker_stats
+            else None
+        )
 
         # ── Preprocessing mode ────────────────────────────────────────────────
         st.subheader("Processing Profile")
         preprocess_mode = st.radio(
             "Preprocessing mode",
-            ["Single", "Dual"],
+            ["Dual", "Single"],
             horizontal=True,
             help=(
-                "**Single**: one preprocessing pass applied uniformly to all audio. "
-                "**Dual**: runs preprocessing twice — a *mild* version used for "
+                "**Dual** (default): runs preprocessing twice — a *mild* version used for "
                 "VAD/diarization (preserving natural speaker characteristics) and a "
                 "*strong* version used for ASR transcription (maximising speech clarity). "
-                "Recommended for noisy recordings where heavy noise reduction would "
-                "otherwise hurt speaker segmentation."
+                "Recommended for most recordings. **Single**: one preprocessing pass applied "
+                "uniformly to all audio."
             ),
         )
 
-        if preprocess_mode == "Single":
-            preprocess_audio_enabled, preprocess_config = _render_preprocessing_profile(
-                "", auto_config, default_config
-            )
-        else:
+        if preprocess_mode == "Dual":
             # Dual mode: mild for VAD, strong for ASR
             st.info(
-                "**Dual mode** generates two preprocessed versions of your audio:  \n"
-                "- **Mild** (left): gentle processing used for VAD/diarization — avoids "
-                "artifacts that confuse speaker segmentation.  \n"
-                "- **Strong** (right): more aggressive enhancement used for ASR transcription "
-                "— maximises speech clarity. Saved with `_mild` / `_strong` suffix."
+                "**Dual mode** saves two versions of your audio:\n"
+                "- **Mild** (`_mild`): for VAD/diarization — preserves voice characteristics.\n"
+                "- **Strong** (`_strong`): for ASR — maximises speech clarity for Whisper.\n\n"
+                "Recommended defaults: Mild → VAD (HPF only); Strong → Noisy (HPF + NR + "
+                "Loudness Norm + Peak Limiter)"
             )
+            with st.expander("What processing does each mode apply?", expanded=False):
+                st.markdown(
+                    "| Processing Step | Mild (VAD) | Strong (ASR) |\n"
+                    "|---|---|---|\n"
+                    "| Loudness Norm | When needed | Always |\n"
+                    "| High-Pass Filter (60 Hz) | Always | Always |\n"
+                    "| Noise Reduction | No | When needed |\n"
+                    "| Peak Limiter | No | Always |\n"
+                    "\nMild mode prioritizes preserving natural voice characteristics for "
+                    "speaker separation. Strong mode prioritizes clarity for ASR accuracy.\n\n"
+                    "**Processing step details:**\n\n"
+                    "- **Loudness Normalisation (EBU R 128):** Scales audio to a target "
+                    "loudness (typically −23 LUFS). Gain is capped at 20 dB to prevent "
+                    "excessive amplification and distortion. Example: if your audio is "
+                    "−43 LUFS (20 dB too quiet), it gets boosted by the cap to reach "
+                    "−23 LUFS instead of needing +20 dB.\n\n"
+                    "- **High-Pass Filter (HPF):** Removes DC offset and low-frequency "
+                    "rumble (<60 Hz) that doesn't carry speech but inflates the noise floor.\n\n"
+                    "- **Noise Reduction:** Spectral gating reduces stationary/adaptive noise. "
+                    "Strength 0.8 (80%) is standard for noisy recordings. Disabled for VAD "
+                    "to preserve speaker timbre.\n\n"
+                    "- **Peak Limiter:** Hard-clips peaks to a ceiling (amplitude 0.95 = "
+                    "−0.4 dBFS) to prevent digital clipping at 0 dBFS. Example: if peak is "
+                    "−2.0 dBFS (risky), it remains −2.0 dBFS; if peak is −0.3 dBFS (clipping), "
+                    "it gets clipped to −0.4 dBFS. Always apply when loudness is normalized.\n\n"
+                    "**Example impact:** Raw audio at −40 LUFS with −1.5 dBFS peak (clipping "
+                    "risk):\n\n"
+                    "1. Loudness Norm (−40 → −23 LUFS, +17 dB gain) → peak becomes −1.5 + 17 = "
+                    "+15.5 dBFS (severe clipping!)\n"
+                    "2. Peak Limiter (clip to −0.4 dBFS) → audio is now loud and safe."
+                )
+
             mild_col, strong_col = st.columns(2)
             with mild_col:
                 _, preprocess_config_mild = _render_preprocessing_profile(
                     "mild_",
                     auto_config,
                     default_config,
-                    title="Mild — for VAD / Diarization",
+                    title="Mild — VAD / Diarization",
+                    default_profile_key="vad",
+                    speaker_audio=_speaker_audio,
                 )
             with strong_col:
                 _, preprocess_config_strong = _render_preprocessing_profile(
                     "strong_",
                     auto_config,
                     default_config,
-                    title="Strong — for ASR Transcription",
+                    title="Strong — ASR Transcription",
+                    default_profile_key="noisy",
+                    speaker_audio=_speaker_audio,
                 )
-
-        # ── Per-speaker loudness normalisation impact table ──────────────
-        if all_speaker_stats and preprocess_mode == "Single":
-            import pandas as pd
-
-            st.markdown("#### Per-Speaker Processing Impact")
-            _impact_rows = []
-            for _spk, _spk_data in all_speaker_stats.items():
-                _s = _spk_data["stats"]
-                _lufs = _s.get("lufs")
-                _snr = _s.get("snr_estimate_db")
-
-                # Loudness normalisation
-                if _lufs is not None and preprocess_config.loudness_norm:
-                    _gain_needed = preprocess_config.target_lufs - _lufs
-                    _max_gain = preprocess_config.max_loudness_gain_db
-                    _tol = preprocess_config.loudness_tolerance_db
-                    if abs(_gain_needed) <= _tol:
-                        _actual_gain = 0.0
-                        _norm_note = f"skip (within ±{_tol:.0f} dB)"
-                    elif _gain_needed > _max_gain:
-                        _actual_gain = _max_gain
-                        _norm_note = f"⚠ capped at +{_max_gain:.0f} dB (would distort)"
-                    else:
-                        _actual_gain = _gain_needed
-                        _norm_note = "applied"
-                    _eff_lufs = _lufs + _actual_gain
-                else:
-                    _actual_gain = 0.0
-                    _eff_lufs = _lufs
-                    norm_note = (
-                        "disabled" if not preprocess_config.loudness_norm else "N/A"
-                    )
-                    _norm_note = norm_note
-
-                # SNR → profile context
-                if _snr is not None:
-                    if _snr < 18.0:
-                        _snr_note = f"{_snr:.1f} dB → Noisy (< 18)"
-                    elif _snr > 25.0:
-                        _snr_note = f"{_snr:.1f} dB → Clean (> 25)"
-                    else:
-                        _snr_note = f"{_snr:.1f} dB → Moderate"
-                else:
-                    _snr_note = "N/A"
-
-                _impact_rows.append(
-                    {
-                        "Speaker": _spk,
-                        "LUFS (raw)": f"{_lufs:.1f}" if _lufs is not None else "N/A",
-                        "Gain Needed": (
-                            f"{_gain_needed:+.1f} dB" if _lufs is not None else "N/A"
-                        ),
-                        "Gain Applied": (
-                            f"{_actual_gain:+.1f} dB" if _lufs is not None else "N/A"
-                        ),
-                        "LUFS After Norm": (
-                            f"{_eff_lufs:.1f}" if _eff_lufs is not None else "N/A"
-                        ),
-                        "Norm Status": _norm_note,
-                        "SNR → Profile": _snr_note,
-                    }
-                )
-
-            st.dataframe(pd.DataFrame(_impact_rows), width="stretch", hide_index=True)
-
-            _notes = []
-            if preprocess_config.highpass:
-                _notes.append(f"HPF: {preprocess_config.highpass_freq:.0f} Hz cutoff")
-            if preprocess_config.noise_reduce:
-                _notes.append(
-                    f"Noise reduction: strength "
-                    f"{preprocess_config.noise_reduce_prop_decrease:.2f}"
-                )
-            if preprocess_config.peak_limit:
-                import math
-
-                _peak_db = 20.0 * math.log10(preprocess_config.peak_ceiling)
-                _notes.append(
-                    f"Peak limiter: {preprocess_config.peak_ceiling} "
-                    f"({_peak_db:.2f} dBFS)"
-                )
-            if _notes:
-                st.caption("Global (applies to all speakers): " + " | ".join(_notes))
+        else:
+            # Single mode
+            preprocess_audio_enabled, preprocess_config = _render_preprocessing_profile(
+                "", auto_config, default_config, speaker_audio=_speaker_audio
+            )
 
     # =========================================================================
     # EVALUATION (OPTIONAL)
@@ -1140,11 +1448,17 @@ def main() -> None:
         persist_transcription_artifacts = c3.checkbox(
             "Keep per-segment WAV / transcript cache", value=False
         )
-        c4, c5 = st.columns(2)
+        c4, c5, c6 = st.columns(3)
         cleanup_speaker_folders = c4.checkbox(
             "Clean up speaker folders after run", value=True
         )
-        export_elan = c5.checkbox("Export ELAN-compatible labels", value=True)
+        cleanup_preprocessed = c5.checkbox(
+            "Delete preprocessed audio files",
+            value=True,
+            help="Remove the preprocessed/ folder after pipeline completes to save disk space. "
+            "Uncheck to keep them (e.g., for inspection/debugging).",
+        )
+        export_elan = c6.checkbox("Export ELAN-compatible labels", value=True)
 
     # =========================================================================
     # RUN BUTTON
@@ -1214,6 +1528,7 @@ def main() -> None:
                 skip_transcription_if_exists=skip_transcription_if_exists,
                 persist_transcription_artifacts=persist_transcription_artifacts,
                 cleanup_speaker_folders=cleanup_speaker_folders,
+                cleanup_preprocessed=cleanup_preprocessed,
                 min_duration_samples=float(min_duration_samples),
                 export_elan=export_elan,
                 preprocess_config=preprocess_config,
@@ -1281,25 +1596,208 @@ def main() -> None:
             st.success("✅ Pipeline completed successfully!")
             result: dict = st.session_state.result or {}
 
-            # ── Output file table ────────────────────────────────────────────
-            file_rows = [
-                {"Output": k, "Path": str(v)}
-                for k, v in result.items()
-                if isinstance(v, str) and v and k not in ("output_dir",)
+            import io
+            import zipfile
+
+            import pandas as pd
+
+            output_dir_result: str = result.get("output_dir", "")
+
+            # ── Helper: collect all real output files ─────────────────────────
+            def _collect_output_files() -> list[tuple[str, str]]:
+                """Return list of (label, abs_path) for all pipeline output files."""
+                files: list[tuple[str, str]] = []
+                seen: set[str] = set()
+
+                def _add(label: str, path: Any) -> None:
+                    if isinstance(path, str) and path and os.path.isfile(path):
+                        if path not in seen:
+                            seen.add(path)
+                            files.append((label, path))
+
+                # Key named outputs from the result dict
+                _add("final_labels.txt", result.get("final_labels"))
+                _add("elan_export", result.get("elan_export"))
+                _add("merged_turns.txt", result.get("merged_turns"))
+                _add("raw_transcriptions.txt", result.get("raw_transcriptions"))
+                _add("classified.txt", result.get("classified"))
+                _add("combined_vad.txt", result.get("combined_vad"))
+                _add("filtered_segments.txt", result.get("filtered_segments"))
+                for k, v in (result.get("vad_paths") or {}).items():
+                    _add(f"vad_{k}.txt", v)
+                for k, v in (result.get("evaluation_plots") or {}).items():
+                    _add(f"plot_{k}", v)
+                # Any other string-valued keys not yet captured
+                for k, v in result.items():
+                    if k not in (
+                        "output_dir",
+                        "turns_df",
+                        "classified_df",
+                        "final_df",
+                        "evaluation",
+                        "evaluation_plots",
+                        "cleaned_speaker_dirs",
+                        "vad_paths",
+                        "preprocessed_audio_mild",
+                        "preprocessed_audio_strong",
+                        "preprocessed_audio",
+                    ):
+                        _add(k, v)
+
+                # Preprocessed audio from result dict (may be string or dict)
+                for cfg_key, display_prefix in [
+                    ("preprocessed_audio_mild", "preprocessed/Audio_Mild"),
+                    ("preprocessed_audio_strong", "preprocessed/Audio_Strong"),
+                    ("preprocessed_audio", "preprocessed/Audio"),
+                ]:
+                    pp_audio = result.get(cfg_key)
+                    if pp_audio:
+                        if isinstance(pp_audio, str):
+                            # Single file path
+                            _add(display_prefix, pp_audio)
+                        elif isinstance(pp_audio, dict):
+                            # Dict of speaker → path
+                            for speaker, path in pp_audio.items():
+                                if isinstance(path, str):
+                                    _add(f"{display_prefix}_{speaker}", path)
+
+                # Preprocessed audio files
+                if output_dir_result:
+                    pp_dir = os.path.join(output_dir_result, "preprocessed")
+                    if os.path.isdir(pp_dir):
+                        for fn in sorted(os.listdir(pp_dir)):
+                            fp = os.path.join(pp_dir, fn)
+                            if os.path.isfile(fp):
+                                _add(f"preprocessed/{fn}", fp)
+
+                return files
+
+            all_output_files = _collect_output_files()
+
+            # ── ① PRIMARY OUTPUT: Final Labels ───────────────────────────────
+            final_labels_path = result.get("final_labels")
+            st.markdown("---")
+            st.markdown("## 📄 Final Labels")
+            if final_labels_path and os.path.isfile(final_labels_path):
+                col_dl, col_info = st.columns([1, 3])
+                with col_dl:
+                    with open(final_labels_path, "rb") as _f:
+                        st.download_button(
+                            label="⬇ Download final_labels.txt",
+                            data=_f.read(),
+                            file_name=os.path.basename(final_labels_path),
+                            mime="text/plain",
+                            type="primary",
+                            key="dl_final_labels",
+                        )
+                with col_info:
+                    st.caption(f"`{final_labels_path}`")
+
+                final_df = result.get("final_df")
+                if final_df is not None:
+                    st.dataframe(final_df, use_container_width=True)
+                else:
+                    try:
+                        _preview_df = pd.read_csv(
+                            final_labels_path,
+                            sep="\t",
+                            comment="#",
+                            on_bad_lines="skip",
+                        )
+                        st.dataframe(_preview_df, use_container_width=True)
+                    except Exception:
+                        pass
+            else:
+                st.info("No final_labels file was produced.")
+
+            # ── ② DOWNLOAD ALL FILES (ZIP) ───────────────────────────────────
+            st.markdown("---")
+            st.markdown("## ⬇ Download All Outputs")
+            if all_output_files:
+                _zip_buf = io.BytesIO()
+                with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+                    for label, fpath in all_output_files:
+                        _zf.write(fpath, arcname=label)
+                _zip_buf.seek(0)
+                _run_name = (
+                    os.path.basename(output_dir_result.rstrip("/")) or "pipeline_output"
+                )
+                st.download_button(
+                    label=f"⬇ Download all outputs as {_run_name}.zip",
+                    data=_zip_buf,
+                    file_name=f"{_run_name}.zip",
+                    mime="application/zip",
+                    key="dl_all_zip",
+                )
+                st.caption(
+                    f"{len(all_output_files)} files will be included in the archive."
+                )
+            else:
+                st.info("No output files found to download.")
+
+            # ── ③ PREPROCESSED AUDIO ─────────────────────────────────────────
+            _pp_files = [
+                (lbl, fp)
+                for lbl, fp in all_output_files
+                if lbl.startswith("preprocessed/")
             ]
-            if file_rows:
-                import pandas as pd
+            if _pp_files:
+                st.markdown("---")
+                st.markdown("## 🔊 Processed Audio Files")
+                for lbl, fpath in _pp_files:
+                    ext = fpath.rsplit(".", 1)[-1].lower()
+                    mime = (
+                        "audio/wav"
+                        if ext == "wav"
+                        else "audio/mpeg" if ext == "mp3" else "audio/flac"
+                    )
+                    col_a, col_b = st.columns([2, 3])
+                    with col_a:
+                        with open(fpath, "rb") as _f:
+                            st.download_button(
+                                label=f"⬇ {os.path.basename(fpath)}",
+                                data=_f.read(),
+                                file_name=os.path.basename(fpath),
+                                mime=mime,
+                                key=f"dl_audio_{lbl}",
+                            )
+                    with col_b:
+                        try:
+                            with open(fpath, "rb") as _af:
+                                st.audio(_af.read(), format=mime)
+                        except Exception:
+                            pass
 
-                st.subheader("Output Files")
-                st.dataframe(pd.DataFrame(file_rows), width="stretch", hide_index=True)
+            # ── ④ OTHER OUTPUT FILES (individual downloads) ──────────────────
+            _other_files = [
+                (lbl, fp)
+                for lbl, fp in all_output_files
+                if not lbl.startswith("preprocessed/") and lbl != "final_labels.txt"
+            ]
+            if _other_files:
+                with st.expander("Other Output Files", expanded=False):
+                    _txt_mime = {
+                        ".txt": "text/plain",
+                        ".ass": "text/plain",
+                        ".csv": "text/csv",
+                        ".json": "application/json",
+                        ".pdf": "application/pdf",
+                        ".png": "image/png",
+                        ".svg": "image/svg+xml",
+                    }
+                    for lbl, fpath in _other_files:
+                        ext = "." + fpath.rsplit(".", 1)[-1].lower()
+                        mime = _txt_mime.get(ext, "application/octet-stream")
+                        with open(fpath, "rb") as _f:
+                            st.download_button(
+                                label=f"⬇ {lbl}",
+                                data=_f.read(),
+                                file_name=os.path.basename(fpath),
+                                mime=mime,
+                                key=f"dl_other_{lbl}",
+                            )
 
-            # ── Final labels preview ────────────────────────────────────────
-            final_df = result.get("final_df")
-            if final_df is not None:
-                with st.expander("Final Labels Preview", expanded=True):
-                    st.dataframe(final_df, width="stretch")
-
-            # ── Evaluation plots ────────────────────────────────────────────
+            # ── ⑤ EVALUATION PLOTS ───────────────────────────────────────────
             eval_plots = result.get("evaluation_plots")
             if eval_plots:
                 with st.expander("Evaluation Plots", expanded=True):
@@ -1311,8 +1809,8 @@ def main() -> None:
                         if ext in ["png", "jpg", "jpeg"]:
                             st.image(plot_path, use_container_width=True)
                         elif ext == "svg":
-                            with open(plot_path, "r") as _f:
-                                svg_data = _f.read()
+                            with open(plot_path, "r") as _svg_f:
+                                svg_data = _svg_f.read()
                             st.markdown(svg_data, unsafe_allow_html=True)
                         elif ext == "pdf":
                             with open(plot_path, "rb") as _f:
@@ -1324,7 +1822,7 @@ def main() -> None:
                                     key=f"dl_pdf_{plot_name}",
                                 )
 
-            # ── Log (collapsed) ────────────────────────────────────────────
+            # ── ⑥ PIPELINE LOG (collapsed) ───────────────────────────────────
             if st.session_state.log_lines:
                 with st.expander("Full Pipeline Log"):
                     st.code("\n".join(st.session_state.log_lines), language="")

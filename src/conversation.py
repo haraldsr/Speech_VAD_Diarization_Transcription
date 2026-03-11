@@ -253,7 +253,8 @@ def process_conversation(
     skip_transcription_if_exists: bool = False,
     persist_transcription_artifacts: bool = False,
     cleanup_speaker_folders: bool = True,
-    min_duration_samples: float = 1600,  # float('inf'): skips transcription
+    cleanup_preprocessed: bool = True,
+    min_duration_samples: float = 1600,
     export_elan: bool = True,
     preprocess_audio_enabled: bool = False,
     preprocess_config: Optional[PreprocessConfig] = None,
@@ -309,6 +310,11 @@ def process_conversation(
         cleanup_speaker_folders: If True, remove per-speaker subdirectories
             (segment WAVs/cached transcription files and speaker-level
             intermediates) at the end of the run to save disk space.
+        cleanup_preprocessed: If True, remove the preprocessed/ folder
+            after the pipeline completes (to avoid keeping large temporary
+            audio files). Default: True (delete preprocessed files after
+            download is available in GUI). Set to False to keep them for
+            inspection/debugging.
         min_duration_samples: Minimum duration (in samples) for segments
             to be transcribed.
         export_elan: If True, export final labels to ELAN-compatible
@@ -353,6 +359,10 @@ def process_conversation(
     _strong_path_for_diar: Optional[str] = (
         None  # strong path for single-file diarization
     )
+    # Track preprocessed paths for inclusion in the result dict.
+    _preproc_mild: Dict[str, str] = {}
+    _preproc_strong: Dict[str, str] = {}
+    _preproc_single: Dict[str, str] = {}
 
     _dual_mode = (
         preprocess_config_mild is not None or preprocess_config_strong is not None
@@ -360,11 +370,11 @@ def process_conversation(
 
     if _dual_mode:
         # Dual preprocessing: mild version for VAD, strong version for ASR.
-        # Default mild to moderate profile; default strong to noisy profile.
+        # Default mild to vad profile (HPF only); default strong to noisy profile.
         _orig = speakers_audio
         if preprocess_config_mild is None:
             preprocess_config_mild = PreprocessConfig(
-                **{**_PROFILES.get("moderate", {}), "output_suffix": "_mild"}
+                **{**_PROFILES.get("vad", {}), "output_suffix": "_mild"}
             )
         elif preprocess_config_mild.output_suffix == "":
             preprocess_config_mild = _dc_replace(
@@ -385,10 +395,12 @@ def process_conversation(
                 speakers_audio = preprocess_audio(
                     _orig, output_dir, config=preprocess_config_mild
                 )
+                _preproc_mild = {"audio": speakers_audio}
             else:
                 speakers_audio = preprocess_speakers_audio(
                     dict(_orig), output_dir, config=preprocess_config_mild
                 )
+                _preproc_mild = dict(speakers_audio)
 
         # Apply strong preprocessing (will be used for transcription).
         if preprocess_config_strong.enabled:
@@ -396,10 +408,12 @@ def process_conversation(
                 _strong_path_for_diar = preprocess_audio(
                     _orig, output_dir, config=preprocess_config_strong
                 )
+                _preproc_strong = {"audio": _strong_path_for_diar}
             else:
                 speakers_audio_asr = preprocess_speakers_audio(
                     dict(_orig), output_dir, config=preprocess_config_strong
                 )
+                _preproc_strong = dict(speakers_audio_asr)
     else:
         if preprocess_config is not None:
             pp_config = preprocess_config
@@ -413,10 +427,12 @@ def process_conversation(
                 speakers_audio = preprocess_audio(
                     speakers_audio, output_dir, config=pp_config
                 )
+                _preproc_single = {"audio": speakers_audio}
             else:
                 speakers_audio = preprocess_speakers_audio(
                     dict(speakers_audio), output_dir, config=pp_config
                 )
+                _preproc_single = dict(speakers_audio)
 
     vad_paths: Dict[str, str] = {}
     speaker_dirs: Dict[str, str] = {}
@@ -750,6 +766,15 @@ def process_conversation(
         else:
             print("ℹ No speaker folders found to remove")
 
+    if cleanup_preprocessed:
+        pp_dir = os.path.join(output_dir, "preprocessed")
+        if os.path.isdir(pp_dir):
+            try:
+                shutil.rmtree(pp_dir)
+                print("Removed preprocessed audio folder to save disk space.")
+            except Exception as exc:
+                print(f"⚠ Failed to remove preprocessed folder: {exc}")
+
     return {
         "output_dir": output_dir,
         "vad_paths": vad_paths,
@@ -766,6 +791,10 @@ def process_conversation(
         "evaluation": eval_results,
         "evaluation_plots": eval_plot_paths,
         "cleaned_speaker_dirs": cleaned_speaker_dirs,
+        # Preprocessed audio paths (non-empty only when preprocessing was applied)
+        "preprocessed_audio_mild": _preproc_mild,
+        "preprocessed_audio_strong": _preproc_strong,
+        "preprocessed_audio": _preproc_single,
     }
 
 
@@ -806,6 +835,7 @@ def continue_conversation(
     batch_size: Optional[float] = 30.0,
     persist_transcription_artifacts: bool = False,
     cleanup_speaker_folders: bool = True,
+    cleanup_preprocessed: bool = True,
     min_duration_samples: float = 1600,
     export_elan: bool = True,
     evaluate_ref_path: Optional[str] = None,
@@ -1018,6 +1048,15 @@ def continue_conversation(
                     cleaned_speaker_dirs.append(sd)
                 except Exception as exc:
                     print(f"⚠ Failed to remove {sd}: {exc}")
+
+    if cleanup_preprocessed:
+        pp_dir = os.path.join(output_dir, "preprocessed")
+        if os.path.isdir(pp_dir):
+            try:
+                shutil.rmtree(pp_dir)
+                print(f"Removed preprocessed audio folder: {pp_dir}")
+            except Exception as exc:
+                print(f"⚠ Failed to remove preprocessed folder: {exc}")
 
     # ── 10. Evaluation ───────────────────────────────────────────────────────
     eval_results = None

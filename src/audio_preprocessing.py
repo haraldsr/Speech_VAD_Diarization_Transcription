@@ -67,6 +67,7 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
     """Load audio from any supported format into a float32 numpy array.
 
     Tries soundfile first (WAV, FLAC, OGG, AIFF).  Falls back to
+    scipy.io.wavfile for WAV files with unusual encodings, then to
     torchaudio for compressed formats (MP3, M4A, AAC, OPUS, etc.).
     """
     try:
@@ -74,6 +75,27 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
         return cast(np.ndarray, audio), int(sr)
     except Exception:
         pass
+
+    # scipy.io.wavfile handles many WAV variants that libsndfile rejects
+    # (e.g., 24-bit PCM, unusual chunk orders, non-standard headers)
+    ext = Path(path).suffix.lower()
+    if ext == ".wav":
+        try:
+            from scipy.io import wavfile as _wavfile
+
+            _sr, _data = _wavfile.read(path)
+            if _data.dtype.kind == "i":
+                # integer PCM → normalise to [-1, 1] float32
+                _scale = float(np.iinfo(_data.dtype).max)
+                _audio = _data.astype(np.float32) / _scale
+            elif _data.dtype.kind == "u":
+                _scale = float(np.iinfo(_data.dtype).max)
+                _audio = _data.astype(np.float32) / _scale * 2.0 - 1.0
+            else:
+                _audio = _data.astype(np.float32)
+            return cast(np.ndarray, _audio), int(_sr)
+        except Exception:
+            pass
 
     try:
         import torchaudio  # already in requirements
@@ -87,10 +109,10 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
                 audio = audio.T  # stereo: (C, T) → (T, C)
         return audio.astype(np.float32), int(sr)
     except Exception as _e:
-        ext = Path(path).suffix.lower()
         raise RuntimeError(
             f"Cannot load audio '{path}' (format: {ext}). "
             f"Supported: WAV/FLAC/OGG/AIFF via soundfile; "
+            f"unusual WAV via scipy; "
             f"MP3/M4A/AAC/OPUS via torchaudio+ffmpeg. Error: {_e}"
         ) from _e
 
@@ -168,6 +190,19 @@ class PreprocessConfig:
 # Each is a partial dict of PreprocessConfig fields to override.
 
 _PROFILES: Dict[str, Dict[str, Any]] = {
+    "vad": {
+        # Minimal processing for VAD/diarization inputs.
+        # HPF only: removes DC offset and low-frequency rumble that inflates the
+        # noise floor and can trigger false VAD detections — without changing the
+        # spectral shape that speaker-embedding models rely on.
+        # Noise reduction is intentionally OFF: it can distort voice timbre and
+        # confuse speaker separation / diarization.
+        "highpass": True,
+        "highpass_freq": 60.0,
+        "noise_reduce": False,
+        "loudness_norm": False,
+        "peak_limit": False,
+    },
     "clean": {
         # Already good quality — only HPF to remove DC/rumble
         "highpass": True,

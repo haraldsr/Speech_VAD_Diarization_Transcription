@@ -1,7 +1,7 @@
 # Configuration
 ENV_NAME = vdt
 
-.PHONY: help install install-dev install-conda gen-lock lint format clean
+.PHONY: help install install-dev install-conda gen-lock lint format clean app
 
 help:
 	@echo "Available commands:"
@@ -9,11 +9,29 @@ help:
 	@echo "  make install-dev     - Install from requirements.txt (for development)"
 	@echo "  make install-conda   - Install using Conda only (slower)"
 	@echo ""
+	@echo "  make app             - Launch the Streamlit GUI (auto-detects conda/venv)"
+	@echo ""
 	@echo "  make gen-lock        - Generate lockfile (auto-names based on GPU detection)"
 	@echo ""
 	@echo "  make lint            - Run linting (flake8, isort, black, mypy)"
 	@echo "  make format          - Format code (isort + black)"
 	@echo "  make clean           - Remove build artifacts and cache"
+
+app:
+	@echo "Launching Streamlit GUI..."
+	@if conda info --envs 2>/dev/null | grep -qE "^$(ENV_NAME)[[:space:]]"; then \
+		echo "✓ Using conda env: $(ENV_NAME)"; \
+		bash -c "source $$(conda info --base)/etc/profile.d/conda.sh && conda activate $(ENV_NAME) && streamlit run app_gui.py"; \
+	elif [ -f ".venv/bin/activate" ]; then \
+		echo "✓ Using venv: .venv"; \
+		bash -c "source .venv/bin/activate && streamlit run app_gui.py"; \
+	elif [ -f "venv/bin/activate" ]; then \
+		echo "✓ Using venv: venv"; \
+		bash -c "source venv/bin/activate && streamlit run app_gui.py"; \
+	else \
+		echo "⚠ No conda env '$(ENV_NAME)' or venv found — running with current Python."; \
+		streamlit run app_gui.py; \
+	fi
 
 install:
 	@echo "Auto-detecting GPU availability..."
