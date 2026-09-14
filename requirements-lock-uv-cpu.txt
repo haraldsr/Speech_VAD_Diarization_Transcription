@@ -154,7 +154,7 @@ narwhals==2.17.0
 nbclient==0.10.4
 nbconvert==7.17.0
 nbformat==5.10.4
-nemo-toolkit @ git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]
+nemo-toolkit[asr]==2.7.3
 nest-asyncio==1.6.0
 networkx==3.4.2
 notebook==7.5.3

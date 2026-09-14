@@ -183,6 +183,117 @@ def example_full_options() -> dict:
     }
 
 
+def example_with_preprocessing() -> dict:
+    """
+    Example with audio preprocessing for noisy recordings.
+
+    Demonstrates using PreprocessConfig for single and dual-mode preprocessing.
+    Useful for improving transcription accuracy on poor-quality audio.
+
+    Preprocessing stages:
+    - High-pass filter: Removes DC offset and low-frequency rumble (<60 Hz)
+    - Noise reduction: Reduces stationary background noise
+    - Loudness normalization: Standardizes loudness (EBU R 128 standard)
+    - Peak limiter: Prevents digital clipping
+
+    For dual-mode preprocessing (recommended):
+    - Mild profile: High-pass filter only, preserves speaker timbre for VAD/diarization
+    - Strong profile: Full processing (HPF + NR + loudness norm + peak limit) for ASR
+    """
+    from speech_vad_diarization_transcription import PreprocessConfig
+
+    # Option 1: Dual-mode preprocessing (recommended for most cases)
+    # Mild version preserves voice characteristics for speaker separation
+    preprocess_config_mild = PreprocessConfig(
+        enabled=True,
+        highpass=True,
+        highpass_freq=60.0,
+        noise_reduce=False,  # Don't reduce noise for VAD — preserves speaker timbre
+        loudness_norm=False,  # Don't normalize loudness for VAD
+        peak_limit=False,
+    )
+
+    # Strong version maximizes clarity for transcription
+    preprocess_config_strong = PreprocessConfig(
+        enabled=True,
+        highpass=True,
+        highpass_freq=60.0,
+        noise_reduce=True,
+        noise_reduce_stationary=True,
+        noise_reduce_prop_decrease=0.8,  # 80% reduction strength
+        loudness_norm=True,
+        target_lufs=-23.0,  # EBU R 128 standard
+        auto_loudness=True,  # Skip if already within tolerance
+        loudness_tolerance_db=3.0,
+        peak_limit=True,
+        peak_ceiling=0.95,  # Prevent clipping
+    )
+
+    return {
+        # Input/Output
+        "speakers_audio": {
+            "P1": "path/to/speaker1.wav",
+            "P2": "path/to/speaker2.wav",
+        },
+        "output_dir": "outputs/with_preprocessing",
+        # VAD settings
+        "vad_type": "silero",
+        # Preprocessing (dual-mode)
+        "preprocess_config_mild": preprocess_config_mild,
+        "preprocess_config_strong": preprocess_config_strong,
+        # Transcription
+        "transcription_model_name": "openai/whisper-large-v3",
+        "whisper_device": "cuda",
+        "whisper_language": "da",
+    }
+
+
+def example_single_preprocessing() -> dict:
+    """
+    Example with single-mode preprocessing for VAD or balanced processing.
+
+    Use this when you want the same preprocessing applied to all stages
+    (VAD/diarization AND transcription), rather than separate mild/strong versions.
+
+    Choose preset profiles by setting only the needed fields:
+    - 'vad': High-pass filter only (minimal processing)
+    - 'clean': Clean audio — HPF + mild loudness norm + peak limit
+    - 'moderate': Typical audio — HPF + noise reduction + loudness norm + peak limit
+    - 'noisy': Noisy audio — aggressive HPF + strong NR + loudness norm + peak limit
+    """
+    from speech_vad_diarization_transcription import PreprocessConfig
+
+    # Custom single-mode preprocessing for moderate noise levels
+    preprocess_config = PreprocessConfig(
+        enabled=True,
+        highpass=True,
+        highpass_freq=60.0,
+        noise_reduce=True,
+        noise_reduce_stationary=True,
+        noise_reduce_prop_decrease=0.7,  # 70% reduction (moderate)
+        loudness_norm=True,
+        target_lufs=-23.0,
+        auto_loudness=True,
+        loudness_tolerance_db=3.0,
+        peak_limit=True,
+        peak_ceiling=0.95,
+    )
+
+    return {
+        "speakers_audio": {
+            "P1": "path/to/speaker1.wav",
+            "P2": "path/to/speaker2.wav",
+        },
+        "output_dir": "outputs/single_preprocessing",
+        "vad_type": "silero",
+        # Single-mode preprocessing (same for VAD and ASR)
+        "preprocess_config": preprocess_config,
+        "transcription_model_name": "openai/whisper-large-v3",
+        "whisper_device": "cuda",
+        "whisper_language": "da",
+    }
+
+
 # ============================================================================
 # CARBON TRACKING HELPERS
 # ============================================================================
@@ -238,6 +349,8 @@ def main() -> None:
     # config = example_custom_whisper()
     # config = example_cpu_only()
     # config = example_full_options()
+    # config = example_with_preprocessing()  # Dual-mode preprocessing (recommended for noisy audio)
+    # config = example_single_preprocessing()  # Single-mode preprocessing
 
     # -------------------------------------------------------------------------
     # RUN PIPELINE

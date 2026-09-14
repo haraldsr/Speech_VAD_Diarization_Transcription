@@ -462,8 +462,10 @@ def compute_all_errors(
         # err.update({type: {"precision": precision, "recall": recall}})
         err[type] = {"precision": precision, "recall": recall}
 
-        # Time error metrics (only for detected turns)
-        detected_df = type_df[type_df["detected"]]
+        # Time error metrics (only for detected turns).
+        # "detected" mixes True/False with NaN (false positives), so it is an
+        # object column — compare explicitly rather than using it as a mask.
+        detected_df = type_df[type_df["detected"] == 1]
 
         for delta_col in ["duration_delta", "start_delta", "end_delta"]:
             mean_abs = (
@@ -854,7 +856,10 @@ def postprocess_turn_df(
 
     def _active_rows_mask(frame: pd.DataFrame) -> pd.Series:
         if "merged" in frame.columns:
-            return ~frame["merged"]
+            # "merged" is only ever set to True, so unset rows are NaN and the
+            # column is not bool dtype; compare rather than fill, since
+            # .fillna() on an object column silently downcasts (deprecated).
+            return ~frame["merged"].eq(True)
         return pd.Series(True, index=frame.index)
 
     def _merge_same_speaker_segments(
@@ -1061,7 +1066,7 @@ def postprocess_turn_df(
         turns_merged += merged_turn_count
 
     # Remove merged rows
-    df = df[~df["merged"]] if "merged" in df.columns else df
+    df = df[~df["merged"].eq(True)] if "merged" in df.columns else df
 
     # Mark for recursion only when an unblocked merge opportunity still exists.
     # Pairs separated by blockers (e.g., interlocutor turn or self-backchannel)

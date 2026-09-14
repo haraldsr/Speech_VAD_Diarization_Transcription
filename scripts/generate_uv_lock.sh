@@ -13,15 +13,17 @@ PIP_CMD=${PIP_CMD:-pip}
 # Filters out packages installed with `pip install -e .`
 $PIP_CMD list --format=freeze | grep -v "^speech-vad-diarization" | grep -v "^speech_vad_diarization_transcription" > "$OUT.tmp"
 
-# Replace nemo-toolkit rc version with git URL (rc versions don't exist on PyPI)
-# This ensures the lockfile can be installed without errors
-sed -i 's|^nemo-toolkit==.*$|nemo-toolkit @ git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]|g' "$OUT.tmp"
+# Keep the EXACT installed nemo-toolkit version and add the [asr] extra.
+# Do NOT rewrite to "@main": main is a moving target whose dependency tree
+# drifts (e.g. it later required torch>2.8.0) and silently breaks this lock.
+# Pin to the resolved release for reproducibility instead.
+sed -i 's|^nemo-toolkit==\(.*\)$|nemo-toolkit[asr]==\1|g' "$OUT.tmp"
 
 mv "$OUT.tmp" "$OUT"
 
 # Inform the user
 printf "Generated lock file: %s (%d packages)\n" "$OUT" "$(wc -l < "$OUT")"
-printf "Note: nemo-toolkit rc version replaced with git URL\n"
+printf "Note: nemo-toolkit pinned to installed version with [asr] extra\n"
 
 # Note: If you prefer uv to resolve dependencies from `pyproject.toml`,
 # use `uv lock` (requires a valid [project] table). The generated ~requirements

@@ -97,8 +97,27 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
         except Exception:
             pass
 
+    # Compressed formats (M4A/AAC/MP3/OPUS/...) need an FFmpeg-backed decoder.
+    # torchaudio 2.8 removed its FFmpeg backend (decoding moved to TorchCodec),
+    # so torchaudio.load() silently falls back to soundfile and fails on M4A.
+    # Decode via torchcodec, which uses the FFmpeg libraries directly.
+    _errs = []
     try:
-        import torchaudio  # already in requirements
+        from torchcodec.decoders import AudioDecoder
+
+        samples = AudioDecoder(path).get_all_samples()
+        audio = samples.data.numpy()  # (channels, T)
+        if audio.ndim == 2:
+            if audio.shape[0] == 1:
+                audio = audio[0]  # mono: (1, T) → (T,)
+            else:
+                audio = audio.T  # stereo: (C, T) → (T, C)
+        return audio.astype(np.float32), int(samples.sample_rate)
+    except Exception as _e:
+        _errs.append(f"torchcodec: {_e}")
+
+    try:
+        import torchaudio  # legacy fallback (no FFmpeg backend in >=2.8)
 
         waveform, sr = torchaudio.load(path)
         audio = waveform.numpy()
@@ -109,12 +128,14 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
                 audio = audio.T  # stereo: (C, T) → (T, C)
         return audio.astype(np.float32), int(sr)
     except Exception as _e:
-        raise RuntimeError(
-            f"Cannot load audio '{path}' (format: {ext}). "
-            f"Supported: WAV/FLAC/OGG/AIFF via soundfile; "
-            f"unusual WAV via scipy; "
-            f"MP3/M4A/AAC/OPUS via torchaudio+ffmpeg. Error: {_e}"
-        ) from _e
+        _errs.append(f"torchaudio: {_e}")
+
+    raise RuntimeError(
+        f"Cannot load audio '{path}' (format: {ext}). "
+        f"Supported: WAV/FLAC/OGG/AIFF via soundfile; "
+        f"unusual WAV via scipy; "
+        f"MP3/M4A/AAC/OPUS via torchcodec+ffmpeg. Errors: {'; '.join(_errs)}"
+    ) from None
 
 
 # ===================================================================

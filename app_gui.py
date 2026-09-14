@@ -470,6 +470,11 @@ def _render_preprocessing_profile(
             key=f"{key_prefix}enable",
             help="Apply the auto-detected preprocessing pipeline.",
         )
+        # Reconstruct config with the checkbox value to ensure enabled field is updated
+        from dataclasses import asdict
+        cfg_dict = asdict(cfg)
+        cfg_dict["enabled"] = enabled
+        cfg = PreprocessConfig(**cfg_dict)
     elif profile_key == "manual":
         enabled = st.checkbox(
             "Enable preprocessing",
@@ -1092,6 +1097,7 @@ def main() -> None:
             "small",
             "base",
             "tiny",
+            "syvai/hviske-v3-conversation"
         ]
         c1, c2, c3 = st.columns(3)
         transcription_model_name = c1.selectbox("Whisper model", whisper_models)
@@ -1424,7 +1430,7 @@ def main() -> None:
             evaluate_collar = st.slider("Evaluation collar (s)", 0.0, 1.0, 0.25, 0.01)
             evaluate_plot = st.checkbox("Generate evaluation plots", value=True)
             c1, c2 = st.columns(2)
-            evaluate_plot_format = c1.selectbox("Plot format", ["pdf", "png", "svg"])
+            evaluate_plot_format = c1.selectbox("Plot format", ["png", "pdf", "svg"])
             _dpi_raw = int(
                 c2.number_input("Plot DPI (0 = format default)", 0, 600, 0, step=50)
             )
